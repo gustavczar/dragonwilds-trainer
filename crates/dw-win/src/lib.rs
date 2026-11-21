@@ -52,6 +52,7 @@ pub(crate) fn data_dir() -> PathBuf {
 
 fn run() {
     let _ = std::fs::create_dir_all(data_dir());
+    std::panic::set_hook(Box::new(|info| log::line(&format!("panic: {info}"))));
     log::line(concat!("dragonwilds-trainer ", env!("CARGO_PKG_VERSION"), " loaded"));
 
     // SAFETY: a null name returns the game executable's own module.
@@ -117,6 +118,8 @@ fn start(r: &Reflection<'_, mem::InProcess>, objects: u64, names: u64, base: u64
         return;
     }
     log::line("hook installed");
+    std::thread::sleep(Duration::from_secs(5));
+    log::line(&format!("game-thread ProcessEvent calls in 5s: {}", engine::CALLS.load(Ordering::Relaxed)));
 
     std::thread::spawn(|| loop {
         let _ = std::panic::catch_unwind(game::weights_pass);
@@ -124,9 +127,10 @@ fn start(r: &Reflection<'_, mem::InProcess>, objects: u64, names: u64, base: u64
     });
 
     let module = hudhook::windows::Win32::Foundation::HINSTANCE(SELF_MODULE.load(Ordering::Relaxed) as *mut _);
+    // DX12 only: the game's default RHI. The DX11 and DX12 hooks both patch
+    // IDXGISwapChain::Present, so they cannot be installed together.
     let overlay = hudhook::Hudhook::builder()
         .with::<hudhook::hooks::dx12::ImguiDx12Hooks>(ui::Panel::default())
-        .with::<hudhook::hooks::dx11::ImguiDx11Hooks>(ui::Panel::default())
         .with_hmodule(module)
         .build()
         .apply();

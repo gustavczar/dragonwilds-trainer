@@ -19,6 +19,8 @@ type ProcessEvent = unsafe extern "system" fn(*mut c_void, *mut c_void, *mut c_v
 static ORIGINAL: AtomicUsize = AtomicUsize::new(0);
 static GAME_THREAD: AtomicU32 = AtomicU32::new(0);
 static LAST_TICK: AtomicU64 = AtomicU64::new(0);
+/// Game-thread calls seen by the detour; proves the hook is live.
+pub static CALLS: AtomicU64 = AtomicU64::new(0);
 const TICK_MS: u64 = 250;
 
 thread_local! {
@@ -79,6 +81,7 @@ unsafe extern "system" fn detour(obj: *mut c_void, func: *mut c_void, params: *m
     if unsafe { GetCurrentThreadId() } != GAME_THREAD.load(Ordering::Relaxed) {
         return;
     }
+    CALLS.fetch_add(1, Ordering::Relaxed);
     let now = unsafe { GetTickCount64() };
     if now.saturating_sub(LAST_TICK.load(Ordering::Relaxed)) < TICK_MS || IN_TICK.get() {
         return;
