@@ -1,0 +1,32 @@
+[package]
+name = "dw-win"
+description = "Windows side of dragonwilds-trainer: a version.dll proxy loaded by the game."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+# The game loads version.dll from its own folder before System32, so the
+# trainer ships as version.dll and forwards every export to the real one.
+name = "version"
+crate-type = ["cdylib"]
+
+[dependencies]
+dw-core = { path = "../dw-core" }
+hudhook = { version = "0.9.3", default-features = false, features = ["dx11", "dx12"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dependencies.windows-sys]
+version = "0.61"
+features = [
+    "Win32_Foundation",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_LibraryLoader",
+    "Win32_System_SystemInformation",
+    "Win32_System_SystemServices",
+    "Win32_System_Threading",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+]

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/dw-core"]
+members = ["crates/dw-core", "crates/dw-win"]
 
 [workspace.package]
 version = "0.1.0"
@@ -8,6 +8,7 @@ edition = "2021"
 license = "MIT OR Apache-2.0"
 publish = false
 
+# No panic = "abort": the DLL lives inside the game, so a bug must be caught
+# (catch_unwind) and logged instead of taking the game down.
 [profile.release]
-panic = "abort"
 lto = true
