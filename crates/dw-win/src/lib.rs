@@ -121,9 +121,14 @@ fn start(r: &Reflection<'_, mem::InProcess>, objects: u64, names: u64, base: u64
     std::thread::sleep(Duration::from_secs(5));
     log::line(&format!("game-thread ProcessEvent calls in 5s: {}", engine::CALLS.load(Ordering::Relaxed)));
 
-    std::thread::spawn(|| loop {
-        let _ = std::panic::catch_unwind(game::weights_pass);
-        std::thread::sleep(Duration::from_secs(20));
+    std::thread::spawn(|| {
+        for n in 0u64.. {
+            let _ = std::panic::catch_unwind(game::player_pass);
+            if n % 10 == 0 {
+                let _ = std::panic::catch_unwind(game::weights_pass);
+            }
+            std::thread::sleep(Duration::from_secs(2));
+        }
     });
 
     let module = hudhook::windows::Win32::Foundation::HINSTANCE(SELF_MODULE.load(Ordering::Relaxed) as *mut _);

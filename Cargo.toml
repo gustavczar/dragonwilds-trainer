@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/dw-core", "crates/dw-win"]
+members = ["crates/dw-core", "crates/dw-win", "crates/dw-probe"]
 
 [workspace.package]
 version = "0.1.0"

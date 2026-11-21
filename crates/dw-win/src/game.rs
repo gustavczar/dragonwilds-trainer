@@ -1,17 +1,18 @@
-//! Finds the local player and applies the enabled features. Everything is
-//! resolved by name once (`init`); `tick` runs on the game thread 4x a second.
+//! Finds the local player and applies the enabled features. Names are
+//! resolved once (`init`); a background pass finds the player's components
+//! (`background_pass`); `tick` applies the features on the game thread 4x a second.
 
 use crate::{engine, log, mem::InProcess, settings};
 use dw_core::features::{self, SlotState};
 use dw_core::{FunctionInfo, MemoryExt, Reflection, Toggles};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 static MEM: InProcess = InProcess;
 static GAME: OnceLock<Game> = OnceLock::new();
 static PAUSED: AtomicBool = AtomicBool::new(false);
-/// Shown in the panel: the local player was found on the last tick.
+/// Shown in the panel: the player's components were found.
 pub static PLAYER_FOUND: AtomicBool = AtomicBool::new(false);
 
 /// A spell's last-cast time is written this far in the past (float seconds).
@@ -19,6 +20,8 @@ const LONG_AGO: f32 = -1.0e9;
 /// Element of TMap<UObject*, float>: key 8 + value 4 + hash links 8, aligned to 8.
 const CAST_MAP_STRIDE: u64 = 24;
 const CAST_MAP_VALUE: u64 = 8;
+/// The backpack: the controller's paged inventory (hotbar, backpack, rune and ammo pouches).
+const BACKPACK_CLASS: &str = "PagedInventoryWithLogComponent";
 
 struct Offsets {
     viewport: u64,
@@ -31,6 +34,9 @@ struct Offsets {
     item_data: u64,
     max_stack: u64,
     weight: u64,
+    item_slots: u64,
+    cast_times: u64,
+    carry_weight: u64,
 }
 
 struct Game {
@@ -42,25 +48,31 @@ struct Game {
     set_immortal: Option<FunctionInfo>,
     set_can_die: Option<FunctionInfo>,
     set_stack: Option<FunctionInfo>,
+    update_encumbrance: Option<FunctionInfo>,
     state: Mutex<State>,
+}
+
+/// The player's objects, found by the background pass.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Player {
+    pc: u64,
+    pawn: u64,
+    health: Option<u64>,
+    magic: Option<u64>,
+    encumbrance: Option<u64>,
+    backpack: Option<u64>,
 }
 
 #[derive(Default)]
 struct State {
+    player: Option<Player>,
     /// Health component we made immortal, if any.
     immortal: Option<u64>,
     /// Original weight of every ItemData we zeroed.
     weights: HashMap<u64, f32>,
-    logged: HashSet<String>,
 }
 
-fn once(st: &mut State, msg: &str) {
-    if st.logged.insert(msg.to_string()) {
-        log::line(msg);
-    }
-}
-
-/// Resolves the engine object, the player pointer chain and the game functions.
+/// Resolves the engine object, the player pointer chain, field offsets and game functions.
 pub fn init(objects: u64, names: u64) -> Result<(), String> {
     let r = Reflection::new(&MEM, dw_core::Layout::default(), objects, names);
     let prop = |class: &str, name: &str| -> Result<u64, String> {
@@ -81,6 +93,9 @@ pub fn init(objects: u64, names: u64) -> Result<(), String> {
         item_data: prop("Item", "ItemData")?,
         max_stack: prop("ItemData", "MaxStackSize")?,
         weight: prop("ItemData", "Weight")?,
+        item_slots: prop("InventoryComponent", "ItemSlots")?,
+        cast_times: prop("PlayerUtilityMagicComponent", "LastCastTimeBySpellData")?,
+        carry_weight: prop("PlayerEncumbranceComponent", "CurrentCarryWeight")?,
     };
     let game = Game {
         item_class: r.find_type("Item").ok_or("class Item not found")?,
@@ -88,12 +103,18 @@ pub fn init(objects: u64, names: u64) -> Result<(), String> {
         set_immortal: func("HealthComponent", "SetIsImmortal"),
         set_can_die: func("HealthComponent", "SetCanDie"),
         set_stack: func("Item", "SetStackSize"),
+        update_encumbrance: func("PlayerEncumbranceComponent", "UpdateEncumberedStatus"),
         r,
         engine,
         off,
         state: Mutex::new(State::default()),
     };
-    for (name, f) in [("SetIsImmortal", &game.set_immortal), ("SetCanDie", &game.set_can_die), ("SetStackSize", &game.set_stack)] {
+    for (name, f) in [
+        ("SetIsImmortal", &game.set_immortal),
+        ("SetCanDie", &game.set_can_die),
+        ("SetStackSize", &game.set_stack),
+        ("UpdateEncumberedStatus", &game.update_encumbrance),
+    ] {
         if f.is_none() {
             log::line(&format!("function {name} not found; its feature stays off"));
         }
@@ -111,8 +132,8 @@ impl Game {
         self.r.is_object(p).then_some(p)
     }
 
-    /// Engine -> viewport -> world -> game instance -> LocalPlayers[0] -> controller -> pawn.
-    fn player(&self) -> Option<(u64, u64)> {
+    /// Engine -> viewport -> world -> game instance -> LocalPlayers[0] -> (controller, pawn).
+    fn controller_and_pawn(&self) -> Option<(u64, u64)> {
         let o = &self.off;
         let world = self.ptr(self.ptr(self.engine, o.viewport)?, o.world)?;
         let gi = self.ptr(world, o.game_instance)?;
@@ -122,24 +143,31 @@ impl Game {
         Some((pc, self.ptr(pc, o.pawn)?))
     }
 
-    /// The object held by the first ObjectProperty of `owner` (its class or a
-    /// super) that points at an instance of `class`.
-    fn component(&self, owner: u64, class: &str) -> Option<u64> {
-        let mut c = self.r.class_of(owner);
-        for _ in 0..32 {
-            let cls = c?;
-            for p in self.r.properties(cls) {
-                if p.type_name == "ObjectProperty" {
-                    if let Some(v) = self.ptr(owner, p.offset as u64) {
-                        if self.r.is_a(v, class) {
-                            return Some(v);
-                        }
-                    }
+    /// Components are subobjects of their actor: walk the object array once and
+    /// keep the ones whose outer is the pawn or the controller.
+    fn find_player(&self, pc: u64, pawn: u64) -> Player {
+        let mut p = Player { pc, pawn, ..Player::default() };
+        let outer_at = self.r.layout.uobject_outer;
+        for i in 0..self.r.object_count().unwrap_or(0) {
+            let Some(o) = self.r.object_at(i) else { continue };
+            let Some(outer) = MEM.read_u64(o + outer_at) else { continue };
+            if outer == pawn {
+                if p.health.is_none() && self.r.is_a(o, "HealthComponent") {
+                    p.health = Some(o);
+                } else if p.magic.is_none() && self.r.is_a(o, "PlayerUtilityMagicComponent") {
+                    p.magic = Some(o);
+                } else if p.encumbrance.is_none() && self.r.is_a(o, "PlayerEncumbranceComponent") {
+                    p.encumbrance = Some(o);
                 }
+            } else if outer == pc && p.backpack.is_none() && self.r.is_a(o, BACKPACK_CLASS) {
+                p.backpack = Some(o);
             }
-            c = self.r.super_of(cls);
         }
-        None
+        p
+    }
+
+    fn label(&self, o: Option<u64>) -> String {
+        o.and_then(|o| self.r.class_of(o)).and_then(|c| self.r.object_name(c)).unwrap_or_else(|| "NOT FOUND".into())
     }
 
     fn is_instance(&self, obj: u64, class: u64) -> bool {
@@ -155,17 +183,22 @@ impl Game {
     }
 }
 
-/// Calls a game function whose first parameter of `kind` gets `value`.
+/// Calls a game function, putting `value` in its first parameter of type `kind`
+/// (or no parameter when `kind` is empty).
 fn call_with(obj: u64, f: &FunctionInfo, kind: &str, value: &[u8]) {
     let mut buf = vec![0u8; engine::params_size(f)];
-    let Some(p) = f.params.iter().find(|p| p.type_name == kind) else { return };
-    let at = p.offset as usize;
-    if at + value.len() <= buf.len() {
+    if !kind.is_empty() {
+        let Some(p) = f.params.iter().find(|p| p.type_name == kind) else { return };
+        let at = p.offset as usize;
+        if at + value.len() > buf.len() {
+            return;
+        }
         buf[at..at + value.len()].copy_from_slice(value);
-        engine::call(obj, f, &mut buf);
     }
+    engine::call(obj, f, &mut buf);
 }
 
+/// Game thread, 4x a second.
 pub fn tick() {
     let Some(g) = GAME.get() else { return };
     if PAUSED.load(Ordering::Relaxed) {
@@ -173,27 +206,29 @@ pub fn tick() {
     }
     let t = settings::toggles();
     let Ok(mut st) = g.state.lock() else { return };
-    let Some((pc, pawn)) = g.player() else {
-        PLAYER_FOUND.store(false, Ordering::Relaxed);
+    let Some(p) = st.player else { return };
+    // The pass may be up to 2 s old: drop it if the player changed meanwhile.
+    if g.controller_and_pawn() != Some((p.pc, p.pawn)) {
         return;
-    };
-    PLAYER_FOUND.store(true, Ordering::Relaxed);
-
-    health(g, &mut st, &t, pawn);
-    if t.no_cooldown {
-        cooldowns(g, &mut st, pawn);
     }
-    if t.fill_slots || t.free_runes {
-        refill(g, &mut st, &t, pc);
+    let live = |o: Option<u64>| o.filter(|&o| g.r.is_object(o));
+
+    if let Some(hc) = live(p.health) {
+        health(g, &mut st, &t, hc);
+    }
+    if let (true, Some(magic)) = (t.no_cooldown, live(p.magic)) {
+        cooldowns(g, magic);
+    }
+    if let (true, Some(enc)) = (t.zero_weight, live(p.encumbrance)) {
+        carry_weight(g, enc);
+    }
+    if let (true, Some(bag)) = (t.fill_slots || t.free_runes, live(p.backpack)) {
+        refill(g, &t, bag);
     }
 }
 
-fn health(g: &Game, st: &mut State, t: &Toggles, pawn: u64) {
+fn health(g: &Game, st: &mut State, t: &Toggles, hc: u64) {
     let (Some(immortal), Some(can_die)) = (&g.set_immortal, &g.set_can_die) else { return };
-    let Some(hc) = g.component(pawn, "HealthComponent") else {
-        once(st, "HealthComponent not found on the player");
-        return;
-    };
     // Only undo what we did: never clear an immortality the game set itself.
     match (t.infinite_health, st.immortal == Some(hc)) {
         (true, false) => {
@@ -212,13 +247,8 @@ fn health(g: &Game, st: &mut State, t: &Toggles, pawn: u64) {
     }
 }
 
-fn cooldowns(g: &Game, st: &mut State, pawn: u64) {
-    let Some(magic) = g.component(pawn, "PlayerUtilityMagicComponent") else {
-        once(st, "PlayerUtilityMagicComponent not found on the player");
-        return;
-    };
-    let Some(map) = g.r.class_of(magic).and_then(|c| g.r.find_property(c, "LastCastTimeBySpellData")) else { return };
-    let map = magic + map.offset as u64;
+fn cooldowns(g: &Game, magic: u64) {
+    let map = magic + g.off.cast_times;
     let (Some(data), Some(num)) = (MEM.read_u64(map), MEM.read_i32(map + 8)) else { return };
     for i in 0..num.clamp(0, 512) as u64 {
         let e = data + i * CAST_MAP_STRIDE;
@@ -229,20 +259,21 @@ fn cooldowns(g: &Game, st: &mut State, pawn: u64) {
     }
 }
 
-fn refill(g: &Game, st: &mut State, t: &Toggles, pc: u64) {
+/// The game caches the carried total; zero it and let the game re-check the penalty.
+fn carry_weight(g: &Game, enc: u64) {
+    let at = enc + g.off.carry_weight;
+    if MEM.read_f32(at).is_some_and(|w| w > 0.0) && crate::mem::write(at, 0.0f32) {
+        if let Some(update) = &g.update_encumbrance {
+            call_with(enc, update, "", &[]);
+        }
+    }
+}
+
+fn refill(g: &Game, t: &Toggles, bag: u64) {
     let Some(set_stack) = &g.set_stack else { return };
-    let Some(inv) = g.component(pc, "InventoryComponent") else {
-        once(st, "InventoryComponent not found on the controller");
-        return;
-    };
-    let Some(slots) = g.r.class_of(inv).and_then(|c| g.r.find_property(c, "ItemSlots")) else {
-        once(st, "InventoryComponent.ItemSlots not found");
-        return;
-    };
-    let (Some(data), Some(num)) = (MEM.read_u64(inv + slots.offset as u64), MEM.read_i32(inv + slots.offset as u64 + 8)) else {
-        return;
-    };
     let o = &g.off;
+    let slots = bag + o.item_slots;
+    let (Some(data), Some(num)) = (MEM.read_u64(slots), MEM.read_i32(slots + 8)) else { return };
     let wanted = features::BACKPACK_FILL.chain(features::RUNE_POUCH).chain([features::AMMO_SLOT]);
     let mut items = HashMap::new();
     let states: Vec<SlotState> = wanted
@@ -259,14 +290,45 @@ fn refill(g: &Game, st: &mut State, t: &Toggles, pc: u64) {
     for f in features::fills(t, states) {
         if let Some(&item) = items.get(&f.slot) {
             call_with(item, set_stack, "IntProperty", &f.target.to_le_bytes());
-            once(st, &format!("refilled slot {} ({} -> {})", f.slot, f.count, f.target));
+            log::line(&format!("refilled slot {} ({} -> {})", f.slot, f.count, f.target));
         }
     }
 }
 
-/// Background pass (not the game thread): zeroes the weight of every ItemData
-/// while the feature is on, restores the originals when it is switched off.
-/// Rerun periodically so items loaded later are covered too.
+/// Background thread, every 2 s: (re)finds the player's components when the
+/// player changes (world load, respawn), and logs what was found.
+pub fn player_pass() {
+    let Some(g) = GAME.get() else { return };
+    let Some((pc, pawn)) = g.controller_and_pawn() else {
+        PLAYER_FOUND.store(false, Ordering::Relaxed);
+        return;
+    };
+    let known = g.state.lock().ok().and_then(|st| st.player);
+    if known.is_some_and(|p| p.pc == pc && p.pawn == pawn) {
+        return;
+    }
+    let p = g.find_player(pc, pawn);
+    log::line(&format!(
+        "player: pawn={} health={} magic={} encumbrance={} backpack={}",
+        g.label(Some(pawn)),
+        g.label(p.health),
+        g.label(p.magic),
+        g.label(p.encumbrance),
+        g.label(p.backpack)
+    ));
+    if let Some(bag) = p.backpack {
+        let num = MEM.read_i32(bag + g.off.item_slots + 8).unwrap_or(-1);
+        log::line(&format!("backpack slots: {num}"));
+    }
+    PLAYER_FOUND.store(p.health.is_some() || p.backpack.is_some(), Ordering::Relaxed);
+    if let Ok(mut st) = g.state.lock() {
+        st.player = Some(p);
+    }
+}
+
+/// Background thread, every 20 s: zeroes the weight of every ItemData while the
+/// feature is on (so tooltips and new pickups weigh 0), restores the originals
+/// when it is switched off.
 pub fn weights_pass() {
     let Some(g) = GAME.get() else { return };
     if PAUSED.load(Ordering::Relaxed) {

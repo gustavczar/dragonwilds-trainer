@@ -1,0 +1,19 @@
+[package]
+name = "dw-probe"
+description = "Read-only developer tool: inspects a running game through dw-core reflection, from outside the process."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+dw-core = { path = "../dw-core" }
+
+[dependencies.windows-sys]
+version = "0.61"
+features = [
+    "Win32_Foundation",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_Threading",
+]

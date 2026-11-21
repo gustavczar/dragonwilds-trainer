@@ -54,6 +54,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "dw-probe"
+version = "0.1.0"
+dependencies = [
+ "dw-core",
+ "windows-sys",
+]
+
+[[package]]
 name = "dw-win"
 version = "0.1.0"
 dependencies = [
