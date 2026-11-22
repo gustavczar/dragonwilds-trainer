@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1280" height="420" viewBox="0 0 1280 420" role="img" aria-labelledby="t d">
   <title id="t">Dragonwilds Trainer</title>
-  <desc id="d">Open source single-player trainer for RuneScape: Dragonwilds, with its in-game panel of eight switches.</desc>
+  <desc id="d">Open source trainer for RuneScape: Dragonwilds, with its in-game panel of eight switches.</desc>
   <defs>
     <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
       <stop offset="0" stop-color="#0e1311"/>
@@ -25,8 +25,8 @@
   <rect width="1280" height="420" fill="url(#ember)"/>
 
   <g font-family="'Segoe UI', 'Helvetica Neue', Arial, sans-serif">
-    <rect x="72" y="92" width="318" height="30" rx="15" fill="none" stroke="#4d6b57" stroke-width="1.2"/>
-    <text x="231" y="112" text-anchor="middle" font-size="13" font-weight="600" letter-spacing="2" fill="#8fc0a1">OPEN SOURCE · RUST · SOLO</text>
+    <rect x="72" y="92" width="246" height="30" rx="15" fill="none" stroke="#4d6b57" stroke-width="1.2"/>
+    <text x="195" y="112" text-anchor="middle" font-size="13" font-weight="600" letter-spacing="2" fill="#8fc0a1">OPEN SOURCE · RUST</text>
     <text x="70" y="196" font-size="66" font-weight="700" fill="#f3ede4" letter-spacing="-1">Dragonwilds Trainer</text>
     <text x="72" y="244" font-size="24" fill="#c3b7a6">An in-game panel for RuneScape: Dragonwilds</text>
     <text x="72" y="280" font-size="19" fill="#8f8577">Press Esc · eight switches · English &amp; Português</text>

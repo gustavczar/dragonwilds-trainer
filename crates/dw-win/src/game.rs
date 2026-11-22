@@ -355,9 +355,9 @@ fn call_with(obj: u64, f: &FunctionInfo, kind: &str, value: &[u8]) {
     engine::call(obj, f, &mut buf);
 }
 
-/// The saved switches, all off while other players share the world.
+/// The saved switches. They stay on in shared worlds too; the panel warns.
 fn active_toggles() -> Toggles {
-    features::solo_only(settings::toggles(), PLAYERS.load(Ordering::Relaxed))
+    settings::toggles()
 }
 
 /// Game thread, 4x a second.
@@ -631,7 +631,7 @@ pub fn player_pass() {
     };
     if let Some(n) = g.player_count() {
         if PLAYERS.swap(n, Ordering::Relaxed) != n {
-            log::line(&format!("players in world: {n}{}", if n > 1 { " (others present: features off)" } else { "" }));
+            log::line(&format!("players in world: {n}{}", if n > 1 { " (shared world)" } else { "" }));
         }
     }
     let known = g.state.lock().ok().and_then(|st| st.player.as_ref().map(|p| (p.pc, p.pawn)));

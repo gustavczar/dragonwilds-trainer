@@ -53,12 +53,6 @@ impl Toggles {
     };
 }
 
-/// Jagex's Community Modding Guidelines allow cheats in single player only, so
-/// every feature switches off while anyone else is in the world.
-pub fn solo_only(t: Toggles, players: usize) -> Toggles {
-    if players > 1 { Toggles::OFF } else { t }
-}
-
 /// Damage `one_hit` uses to finish a target the player hit.
 pub const ONE_HIT_DAMAGE: f32 = 999_999.0;
 
@@ -255,15 +249,6 @@ mod tests {
         let t: Toggles = serde_json::from_str(r#"{"free_runes": false}"#).unwrap();
         assert!(!t.free_runes, "saved choice kept");
         assert!(t.infinite_stamina, "new switch takes its default");
-    }
-
-    #[test]
-    fn everything_turns_off_while_others_are_in_the_world() {
-        let t = Toggles { one_hit: true, ..Toggles::default() };
-        assert_eq!(solo_only(t, 0), t, "world still loading");
-        assert_eq!(solo_only(t, 1), t, "alone");
-        assert_eq!(solo_only(t, 2), Toggles::OFF);
-        assert!(Feature::ALL.iter().all(|f| !f.get(&Toggles::OFF)), "OFF covers every switch");
     }
 
     #[test]

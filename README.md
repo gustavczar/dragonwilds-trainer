@@ -17,12 +17,14 @@ An open source trainer for **RuneScape: Dragonwilds**, written in Rust. Drop one
 file in the game folder, press `Esc` in game, and switch features on and off
 from a small panel. No launcher, no installer, nothing running outside the game.
 
-> [!IMPORTANT]
-> **Single player only.** Jagex's
+> [!WARNING]
+> **Shared worlds are your responsibility.** Jagex's
 > [Community Modding Guidelines](https://legal.jagex.com/docs/policies/runescape-dragonwilds-community-modding-guidelines)
-> allow cheats in single player and forbid them in shared play. The trainer
-> follows that rule on its own: while anyone else is in your world, every
-> feature switches off and the panel says so.
+> allow cheats in single player and forbid them in shared play. The trainer does
+> not switch itself off when others join: the panel shows a warning and the
+> features keep running. Use it in a shared world only when everyone there
+> agrees, and accept the risk to your account. Some features may not apply in a
+> world someone else hosts.
 
 ## Features
 
@@ -34,7 +36,7 @@ from a small panel. No launcher, no installer, nothing running outside the game.
 | Infinite health | off | Keeps the health bar full; you cannot die. |
 | Infinite stamina | on | Keeps stamina full. |
 | Infinite special charge | on | Keeps the blue bar under your health full, for special abilities. |
-| One hit | off | Any enemy you hit with any weapon or spell dies. |
+| One hit | off | Any enemy you hit with any weapon or spell dies. Enemies killed this way seem to drop no loot, so switch it off when you want the drops. |
 | Zero weight | on | Carried items weigh nothing. |
 
 Your choices are saved in `dw-trainer/settings.json` and come back the next time you play.
@@ -46,8 +48,11 @@ and you can switch it in the panel.
 1. Download `version.dll` from the [latest release](https://github.com/gustavczar/dragonwilds-trainer/releases/latest).
 2. Open the game folder (Steam: right-click the game → **Manage** → **Browse local files**)
    and put the file in `RSDragonwilds\Binaries\Win64\`.
-3. Start the game as usual, load your world and press `Esc`. Click the **DW** icon
-   in the top-right corner to open the panel.
+3. Start the game as usual. A card in the top-right corner shows the trainer
+   loading, step by step, and says **Ready** when it is done (usually under a
+   minute; it waits up to 20 minutes on a slow start).
+4. Load your world and press `Esc`. Click the **DW** icon in the top-right
+   corner to open the panel.
 
 To uninstall, delete `version.dll` and the `dw-trainer` folder next to it.
 
@@ -73,7 +78,7 @@ gh attestation verify version.dll -R gustavczar/dragonwilds-trainer
 The panel draws on top of DirectX 12, the game's default renderer. If you added
 `-dx11` to the launch options, remove it. The features still run with your saved
 settings without the panel. `dw-trainer/trainer.log` should end with
-`panel ready: press Esc in game`.
+`trainer ready: press Esc in game`.
 </details>
 
 <details>
@@ -97,9 +102,10 @@ find. Please open an issue with that file.
 <details>
 <summary><b>Can I get banned?</b></summary>
 
-Jagex's modding guidelines allow cheats in single player, and the trainer turns
-itself off in shared worlds. Still, no one can promise anything about a game
-they do not control. Use it at your own risk.
+Jagex's modding guidelines allow cheats in single player and forbid them in
+shared play, and the trainer does not stop you from using it there. In single
+player you follow the guidelines; in a shared world you do not. Either way, no
+one can promise anything about a game they do not control. Use it at your own risk.
 </details>
 
 <details>
@@ -149,7 +155,7 @@ cargo build -p dw-win --release   # -> target/release/version.dll
 ## Contributing
 
 Issues and pull requests are welcome. For a bug, attach `dw-trainer/trainer.log`
-and say which game version you play. Keep new features single player only.
+and say which game version you play.
 
 ## License and credits
 

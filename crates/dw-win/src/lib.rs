@@ -54,6 +54,7 @@ fn run() {
     let _ = std::fs::create_dir_all(data_dir());
     std::panic::set_hook(Box::new(|info| log::line(&format!("panic: {info}"))));
     log::line(concat!("dragonwilds-trainer ", env!("CARGO_PKG_VERSION"), " loaded"));
+    ui::stage(ui::Stage::Engine); // starts the clock the loading card shows
 
     // SAFETY: a null name returns the game executable's own module.
     let base = unsafe { GetModuleHandleW(core::ptr::null()) } as u64;
@@ -66,8 +67,8 @@ fn run() {
         if let Some(found) = bootstrap::find(&mem, &layout, base) {
             break found;
         }
-        if started.elapsed() > Duration::from_secs(600) {
-            log::line("engine tables not found after 10 min; trainer idle");
+        if started.elapsed() > BOOT_LIMIT {
+            log::line("engine tables not found after 20 min; trainer idle");
             return;
         }
         std::thread::sleep(Duration::from_secs(2));
@@ -78,6 +79,13 @@ fn run() {
         objects - base,
         names - base
     ));
+
+    // The overlay goes up first, so the loading card shows the steps below.
+    while !engine::find_game_thread() {
+        std::thread::sleep(Duration::from_secs(1));
+    }
+    overlay();
+    ui::stage(ui::Stage::Menu);
 
     // Let the main menu finish loading before reading every class.
     std::thread::sleep(Duration::from_secs(20));
@@ -90,33 +98,49 @@ fn run() {
     // Read-only mode: with this file present the trainer only reads and logs.
     if data_dir().join("READONLY").exists() {
         log::line("READONLY present: no hook, no panel");
+        ui::fail("READONLY");
         return;
     }
-    start(&r, objects, names, base);
+    if let Err(e) = start(&r, objects, names, base) {
+        log::line(&format!("{e}; trainer idle"));
+        ui::fail(&e);
+    }
 }
 
-/// Installs the ProcessEvent hook, the weight pass and the in-game panel.
-fn start(r: &Reflection<'_, mem::InProcess>, objects: u64, names: u64, base: u64) {
-    if let Err(e) = game::init(objects, names) {
-        log::line(&format!("init failed: {e}; trainer idle"));
-        return;
+/// How long each boot wait may take before the trainer gives up.
+const BOOT_LIMIT: Duration = Duration::from_secs(20 * 60);
+
+/// Installs the ProcessEvent hook and the weight pass.
+fn start(r: &Reflection<'_, mem::InProcess>, objects: u64, names: u64, base: u64) -> Result<(), String> {
+    ui::stage(ui::Stage::Reading);
+    // A slow boot can still lack the GameEngine instance after the fixed wait:
+    // retry until it exists. Every init error returns before anything is stored.
+    let started = Instant::now();
+    loop {
+        match game::init(objects, names) {
+            Ok(()) => break,
+            Err(e) if started.elapsed() < BOOT_LIMIT => {
+                if started.elapsed() < Duration::from_secs(2) {
+                    log::line(&format!("init not ready ({e}); retrying"));
+                }
+                std::thread::sleep(Duration::from_secs(2));
+            }
+            Err(e) => return Err(format!("init failed after 20 min: {e}")),
+        }
     }
+    if started.elapsed() > Duration::from_secs(1) {
+        log::line(&format!("init ok after {:.1}s of retries", started.elapsed().as_secs_f32()));
+    }
+    ui::stage(ui::Stage::Hooking);
     let code = bootstrap::sections(&mem::InProcess, base);
     // Object 0 is a UPackage, which does not override ProcessEvent, so its vtable
     // slot is UObject::ProcessEvent itself.
-    let Some((index, pe)) = r.object_at(0).and_then(|o| engine::find_process_event(&mem::InProcess, o, &code, r.layout.ufunction_flags))
-    else {
-        log::line("ProcessEvent not found; trainer idle");
-        return;
-    };
+    let (index, pe) = r
+        .object_at(0)
+        .and_then(|o| engine::find_process_event(&mem::InProcess, o, &code, r.layout.ufunction_flags))
+        .ok_or("ProcessEvent not found")?;
     log::line(&format!("ProcessEvent: vtable[{index:#x}] = +{:#x}", pe - base));
-    while !engine::find_game_thread() {
-        std::thread::sleep(Duration::from_secs(1));
-    }
-    if let Err(e) = engine::install(pe) {
-        log::line(&format!("hook failed: {e:?}; trainer idle"));
-        return;
-    }
+    engine::install(pe).map_err(|e| format!("hook failed: {e:?}"))?;
     log::line("hook installed");
     std::thread::sleep(Duration::from_secs(5));
     log::line(&format!("game-thread ProcessEvent calls in 5s: {}", engine::CALLS.load(Ordering::Relaxed)));
@@ -133,7 +157,13 @@ fn start(r: &Reflection<'_, mem::InProcess>, objects: u64, names: u64, base: u64
             std::thread::sleep(Duration::from_secs(2));
         }
     });
+    ui::stage(ui::Stage::Ready);
+    log::line("trainer ready: press Esc in game");
+    Ok(())
+}
 
+/// The in-game panel and loading card.
+fn overlay() {
     let module = hudhook::windows::Win32::Foundation::HINSTANCE(SELF_MODULE.load(Ordering::Relaxed) as *mut _);
     // DX12 only: the game's default RHI. The DX11 and DX12 hooks both patch
     // IDXGISwapChain::Present, so they cannot be installed together.
@@ -143,7 +173,7 @@ fn start(r: &Reflection<'_, mem::InProcess>, objects: u64, names: u64, base: u64
         .build()
         .apply();
     match overlay {
-        Ok(()) => log::line("panel ready: press Esc in game"),
+        Ok(()) => log::line("overlay installed"),
         Err(e) => log::line(&format!("panel failed: {e:?}; features still run with saved settings")),
     }
 }

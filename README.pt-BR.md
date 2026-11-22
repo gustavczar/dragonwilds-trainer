@@ -17,12 +17,14 @@ Um trainer open source para **RuneScape: Dragonwilds**, escrito em Rust. Você
 coloca um arquivo na pasta do jogo, aperta `Esc` dentro do jogo e liga ou desliga
 as funções num painel pequeno. Sem launcher, sem instalador, nada rodando fora do jogo.
 
-> [!IMPORTANT]
-> **Só single player.** As
+> [!WARNING]
+> **Mundo compartilhado é por sua conta.** As
 > [diretrizes de modding da Jagex](https://legal.jagex.com/docs/policies/runescape-dragonwilds-community-modding-guidelines)
-> permitem cheats no single player e proíbem no jogo compartilhado. O trainer
-> segue essa regra sozinho: enquanto houver outro jogador no seu mundo, todas as
-> funções desligam e o painel avisa.
+> permitem cheats no single player e proíbem no jogo compartilhado. O trainer não
+> se desliga quando outras pessoas entram: o painel mostra um aviso e as funções
+> continuam. Use num mundo compartilhado só se todo mundo ali concordar, e aceite
+> o risco para a sua conta. Algumas funções podem não valer num mundo hospedado
+> por outra pessoa.
 
 ## Funções
 
@@ -34,7 +36,7 @@ as funções num painel pequeno. Sem launcher, sem instalador, nada rodando fora
 | Vida infinita | desligada | Mantém a barra de vida cheia; você não morre. |
 | Stamina infinita | ligada | Mantém a stamina cheia. |
 | Barra azul infinita | ligada | Mantém cheia a barra azul embaixo da vida, usada pelas habilidades especiais. |
-| One Hit | desligada | Qualquer inimigo que você acertar, com qualquer arma ou magia, morre. |
+| One Hit | desligada | Qualquer inimigo que você acertar, com qualquer arma ou magia, morre. Inimigos mortos assim parecem não soltar itens: desligue quando quiser o drop. |
 | Peso zero | ligada | Os itens carregados não pesam nada. |
 
 As escolhas ficam salvas em `dw-trainer/settings.json` e voltam na próxima vez que você jogar.
@@ -45,8 +47,11 @@ O painel abre em português quando o Windows está em português, e dá para tro
 1. Baixe o `version.dll` da [versão mais recente](https://github.com/gustavczar/dragonwilds-trainer/releases/latest).
 2. Abra a pasta do jogo (Steam: botão direito no jogo → **Gerenciar** → **Procurar arquivos locais**)
    e coloque o arquivo em `RSDragonwilds\Binaries\Win64\`.
-3. Abra o jogo como sempre, carregue o seu mundo e aperte `Esc`. Clique no ícone **DW**
-   no canto superior direito para abrir o painel.
+3. Abra o jogo como sempre. Um cartão no canto superior direito mostra o trainer
+   carregando, passo a passo, e diz **Pronto** quando termina (em geral menos de
+   um minuto; numa abertura lenta ele espera até 20 minutos).
+4. Carregue o seu mundo e aperte `Esc`. Clique no ícone **DW** no canto superior
+   direito para abrir o painel.
 
 Para desinstalar, apague o `version.dll` e a pasta `dw-trainer` ao lado dele.
 
@@ -72,7 +77,7 @@ gh attestation verify version.dll -R gustavczar/dragonwilds-trainer
 O painel é desenhado sobre o DirectX 12, o renderizador padrão do jogo. Se você
 colocou `-dx11` nas opções de inicialização, tire. Sem o painel, as funções
 continuam rodando com as escolhas salvas. O `dw-trainer/trainer.log` deve terminar
-com `panel ready: press Esc in game`.
+com `trainer ready: press Esc in game`.
 </details>
 
 <details>
@@ -96,9 +101,10 @@ encontrado. Abra uma issue com esse arquivo.
 <details>
 <summary><b>Posso ser banido?</b></summary>
 
-As diretrizes de modding da Jagex permitem cheats no single player, e o trainer se
-desliga em mundos compartilhados. Mesmo assim, ninguém pode garantir nada sobre um
-jogo que não controla. Use por sua conta e risco.
+As diretrizes de modding da Jagex permitem cheats no single player e proíbem no
+jogo compartilhado, e o trainer não impede o uso ali. No single player você segue
+as diretrizes; num mundo compartilhado, não. De todo jeito, ninguém pode garantir
+nada sobre um jogo que não controla. Use por sua conta e risco.
 </details>
 
 <details>
@@ -148,8 +154,7 @@ cargo build -p dw-win --release   # -> target/release/version.dll
 ## Contribuir
 
 Issues e pull requests são bem-vindos. Para reportar um bug, anexe o
-`dw-trainer/trainer.log` e diga qual versão do jogo você usa. Funções novas
-continuam só para single player.
+`dw-trainer/trainer.log` e diga qual versão do jogo você usa.
 
 ## Licença e créditos
 
