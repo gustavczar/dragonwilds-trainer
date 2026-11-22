@@ -126,7 +126,7 @@ fn start(r: &Reflection<'_, mem::InProcess>, objects: u64, names: u64, base: u64
         let mut n = 0u64;
         loop {
             let _ = std::panic::catch_unwind(game::player_pass);
-            if n % 10 == 0 {
+            if n.is_multiple_of(10) {
                 let _ = std::panic::catch_unwind(game::weights_pass);
             }
             n = n.wrapping_add(1);
