@@ -28,16 +28,14 @@ const CAST_MAP_STRIDE: u64 = 24;
 const CAST_MAP_VALUE: u64 = 8;
 /// The backpack: the controller's paged inventory (hotbar, backpack, rune and ammo pouches).
 const BACKPACK_CLASS: &str = "PagedInventoryWithLogComponent";
-const ALL_STYLES_DAMAGE: &str = "DamageMultiplierAllCombatStylesAttribute";
 /// Attributes logged when a player is found, to compare base and effective values.
-const LOGGED_ATTRS: [&str; 7] = [
+const LOGGED_ATTRS: [&str; 6] = [
     "HealthAttribute",
     "MaxHealthAttribute",
     "StaminaAttribute",
     "MaxStaminaAttribute",
     "SpecialChargeAttribute",
     "MaxSpecialChargeAttribute",
-    ALL_STYLES_DAMAGE,
 ];
 
 struct Offsets {
@@ -55,8 +53,15 @@ struct Offsets {
     cast_times: u64,
     carry_weight: u64,
     base_value: u64,
-    /// DominionAttributesComponent arrays caching each attribute's effective value.
-    cached_values: [u64; 2],
+    damage_amount: u64,
+    damage_instigator: u64,
+}
+
+/// A damage function whose parameters carry a DominionDamageEvent.
+struct DamageWatch {
+    name: &'static str,
+    /// Offset of the event inside the function's parameter block.
+    event_offset: u64,
 }
 
 struct Game {
@@ -70,7 +75,7 @@ struct Game {
     set_stack: Option<FunctionInfo>,
     update_encumbrance: Option<FunctionInfo>,
     get_attribute: Option<FunctionInfo>,
-    attribute_changed: Option<FunctionInfo>,
+    damage_events: Vec<DamageWatch>,
     state: Mutex<State>,
 }
 
@@ -93,8 +98,8 @@ struct State {
     player: Option<Player>,
     /// Health component we made immortal, if any.
     immortal: Option<u64>,
-    /// (attribute, original base) of the damage multiplier we raised.
-    one_hit: Option<(u64, f32)>,
+    /// Damage events logged for the current player (the first few, as evidence).
+    damage_logged: u32,
     /// Original weight of every ItemData we zeroed.
     weights: HashMap<u64, f32>,
     /// One-time log lines already written for the current player.
@@ -132,11 +137,26 @@ pub fn init(objects: u64, names: u64) -> Result<(), String> {
         cast_times: prop("PlayerUtilityMagicComponent", "LastCastTimeBySpellData")?,
         carry_weight: prop("PlayerEncumbranceComponent", "CurrentCarryWeight")?,
         base_value: prop("FloatAttribute", "BaseValue")?,
-        cached_values: [
-            prop("DominionAttributesComponent", "AttributeValues")?,
-            prop("DominionAttributesComponent", "SharedAttributeValues")?,
-        ],
+        damage_amount: prop("DominionDamageEvent", "Amount")?,
+        damage_instigator: prop("DominionDamageEvent", "Instigator")?,
     };
+    // Damage functions run through ProcessEvent with the event by reference:
+    // the "will receive" Blueprint events first, the multicasts as a backup.
+    let mut damage_events = Vec::new();
+    for (name, event) in [
+        ("BP_OnWillReceiveDamage", "DamageEvent"),
+        ("BP_OnWillReceivePointDamage", "PointDamageEvent"),
+        ("Multicast_ApplyDamageFromGameplayEffect", "DamageEvent"),
+        ("Multicast_ApplyPointDamageFromGameplayEffect", "PointDamageEvent"),
+    ] {
+        match func("DamageComponent", name).and_then(|f| f.params.iter().find(|p| p.name == event).map(|p| (f.object, p.offset))) {
+            Some((ufunc, at)) if damage_events.len() < engine::WATCHED.len() => {
+                engine::WATCHED[damage_events.len()].store(ufunc as usize, Ordering::Relaxed);
+                damage_events.push(DamageWatch { name, event_offset: at as u64 });
+            }
+            _ => log::line(&format!("damage function {name} not found; one hit misses it")),
+        }
+    }
     let game = Game {
         item_class: r.find_type("Item").ok_or("class Item not found")?,
         item_data_class: r.find_type("ItemData").ok_or("class ItemData not found")?,
@@ -145,7 +165,7 @@ pub fn init(objects: u64, names: u64) -> Result<(), String> {
         set_stack: func("Item", "SetStackSize"),
         update_encumbrance: func("PlayerEncumbranceComponent", "UpdateEncumberedStatus"),
         get_attribute: func("DominionAttributesComponent", "BP_TryGetFloatAttributeValue"),
-        attribute_changed: func("DominionAttributesComponent", "OnAttributeChanged"),
+        damage_events,
         r,
         engine,
         off,
@@ -255,54 +275,6 @@ impl Game {
         (buf[found] != 0).then(|| f32::from_le_bytes(buf[v..v + 4].try_into().unwrap()))
     }
 
-    /// Sets an attribute whose effective value the game only recomputes on its
-    /// own changes (e.g. a damage multiplier): write the base, tell the game it
-    /// changed, and if the cached value still lags, patch the cache entry.
-    /// Game thread only. Returns how the new value took effect, for the log.
-    fn set_attribute(&self, p: &Player, attr: u64, new: f32) -> &'static str {
-        let old = self.value(p, attr);
-        if !self.set_base(attr, new) {
-            return "base write failed";
-        }
-        if let (Some(comp), Some(f)) = (p.attributes, &self.attribute_changed) {
-            call_with(comp, f, "ObjectProperty", &attr.to_le_bytes());
-            if self.value(p, attr) == Some(new) {
-                return "OnAttributeChanged";
-            }
-        }
-        match (p.attributes, old) {
-            (Some(comp), Some(old)) if self.patch_cached(comp, attr, old, new) => "cache patched",
-            _ => "NOT applied (cached value unchanged)",
-        }
-    }
-
-    /// Finds the cache entry of `attr` (a pointer to the attribute or its class,
-    /// followed closely by its current value) and overwrites the value.
-    fn patch_cached(&self, comp: u64, attr: u64, old: f32, new: f32) -> bool {
-        let class = self.r.class_of(attr).unwrap_or(0);
-        for arr in self.off.cached_values {
-            let (Some(data), Some(num)) = (MEM.read_u64(comp + arr), MEM.read_i32(comp + arr + 8)) else { continue };
-            let len = (num.clamp(0, 1024) as usize * 0x40).min(0x10000);
-            let mut buf = vec![0u8; len];
-            if len < 16 || !dw_core::Memory::read(&MEM, data, &mut buf) {
-                continue;
-            }
-            for at in (0..len - 8).step_by(8) {
-                let ptr = u64::from_le_bytes(buf[at..at + 8].try_into().unwrap());
-                if ptr != attr && ptr != class {
-                    continue;
-                }
-                for v in (at + 8..(at + 0x20).min(len - 4)).step_by(4) {
-                    let f = f32::from_le_bytes(buf[v..v + 4].try_into().unwrap());
-                    if (f - old).abs() < 1e-4 && crate::mem::write(data + v as u64, new) {
-                        log::line(&format!("cache entry of attribute found: array +{arr:#x}, value at +{:#x} after its pointer", v - at));
-                        return true;
-                    }
-                }
-            }
-        }
-        false
-    }
 }
 
 /// Calls a game function, putting `value` in its first parameter of type `kind`
@@ -350,7 +322,6 @@ pub fn tick() {
     if t.infinite_special {
         top_up(g, &mut st, &p, "SpecialChargeAttribute", "MaxSpecialChargeAttribute");
     }
-    one_hit(g, &mut st, &t, &p);
     if let (true, Some(magic)) = (t.no_cooldown, live(p.magic)) {
         cooldowns(g, magic);
     }
@@ -426,28 +397,36 @@ fn immortality(g: &Game, st: &mut State, t: &Toggles, hc: u64) {
     }
 }
 
-/// Multiplies the damage of every combat style (melee, ranged, magic); restores it when off.
-fn one_hit(g: &Game, st: &mut State, t: &Toggles, p: &Player) {
-    let Some(&attr) = p.attrs.get(ALL_STYLES_DAMAGE) else { return };
-    match (t.one_hit, st.one_hit) {
-        (true, None) => {
-            let Some(orig) = g.base(attr) else { return };
-            let before = g.value(p, attr);
-            let how = g.set_attribute(p, attr, features::ONE_HIT_MULTIPLIER);
-            st.one_hit = Some((attr, orig));
-            log::line(&format!("one hit on: damage x{before:?} -> x{:?} via {how} (base was {orig})", g.value(p, attr)));
-        }
-        (true, Some((a, _))) if g.value(p, a) != Some(features::ONE_HIT_MULTIPLIER) => {
-            // The game recomputed it (e.g. equipment change): raise it again.
-            let how = g.set_attribute(p, a, features::ONE_HIT_MULTIPLIER);
-            note(st, "one hit reapplied", || format!("one hit reapplied via {how}"));
-        }
-        (false, Some((a, orig))) => {
-            let how = g.set_attribute(p, a, orig);
-            st.one_hit = None;
-            log::line(&format!("one hit off: restored to {orig} via {how}"));
-        }
-        _ => {}
+/// One hit: called from the ProcessEvent detour *before* the game runs one of
+/// the watched damage functions (`engine::WATCHED[index]`). The damage event is
+/// passed by reference, so raising its `Amount` here is the damage the game
+/// applies. Only for damage the local player caused.
+pub fn before_call(index: usize, obj: u64, params: u64) {
+    let Some(g) = GAME.get() else { return };
+    let Some(watch) = g.damage_events.get(index) else { return };
+    if PAUSED.load(Ordering::Relaxed) || !settings::toggles().one_hit {
+        return;
+    }
+    let Ok(mut st) = g.state.try_lock() else { return };
+    let Some((pc, pawn)) = st.player.as_ref().map(|p| (p.pc, p.pawn)) else { return };
+    let event = params + watch.event_offset;
+    let Some(instigator) = MEM.read_u64(event + g.off.damage_instigator) else { return };
+    let Some(amount) = MEM.read_f32(event + g.off.damage_amount) else { return };
+    // Damage the player causes to something else; never to the player (fall damage
+    // can name the player as its own instigator).
+    let target_is_player = g.r.outer_of(obj) == Some(pawn);
+    let mine = instigator != 0 && (instigator == pawn || instigator == pc) && !target_is_player;
+    if st.damage_logged < 5 {
+        st.damage_logged += 1;
+        log::line(&format!(
+            "damage via {}: target={} instigator={} amount={amount} mine={mine}",
+            watch.name,
+            g.label(Some(obj)),
+            g.label(Some(instigator)),
+        ));
+    }
+    if mine && amount > 0.0 && amount < features::ONE_HIT_DAMAGE {
+        crate::mem::write(event + g.off.damage_amount, features::ONE_HIT_DAMAGE);
     }
 }
 
@@ -524,9 +503,9 @@ pub fn player_pass() {
     ));
     PLAYER_FOUND.store(p.health.is_some() || p.backpack.is_some(), Ordering::Relaxed);
     if let Ok(mut st) = g.state.lock() {
-        // A new pawn has new attribute objects: forget what we did to the old ones.
-        st.one_hit = None;
+        // A new pawn: log its values and damage events again.
         st.noted.clear();
+        st.damage_logged = 0;
         st.player = Some(p);
     }
 }

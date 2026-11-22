@@ -21,6 +21,8 @@ static GAME_THREAD: AtomicU32 = AtomicU32::new(0);
 static LAST_TICK: AtomicU64 = AtomicU64::new(0);
 /// Game-thread calls seen by the detour; proves the hook is live.
 pub static CALLS: AtomicU64 = AtomicU64::new(0);
+/// UFunctions whose parameters `game::before_call` may edit before the game runs them.
+pub static WATCHED: [AtomicUsize; 4] = [const { AtomicUsize::new(0) }; 4];
 const TICK_MS: u64 = 250;
 
 thread_local! {
@@ -75,6 +77,11 @@ pub fn install(target: u64) -> Result<(), MH_STATUS> {
 unsafe extern "system" fn detour(obj: *mut c_void, func: *mut c_void, params: *mut c_void) {
     // SAFETY: ORIGINAL is set before the hook is enabled.
     let original: ProcessEvent = unsafe { std::mem::transmute(ORIGINAL.load(Ordering::Acquire)) };
+    if let Some(i) = WATCHED.iter().position(|w| w.load(Ordering::Relaxed) == func as usize) {
+        if !params.is_null() && !IN_TICK.get() {
+            let _ = std::panic::catch_unwind(|| crate::game::before_call(i, obj as u64, params as u64));
+        }
+    }
     unsafe { original(obj, func, params) };
 
     // SAFETY: plain Win32 getters.

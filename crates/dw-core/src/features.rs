@@ -39,8 +39,8 @@ impl Default for Toggles {
     }
 }
 
-/// Multiplier written to the player's all-combat-styles damage attribute by `one_hit`.
-pub const ONE_HIT_MULTIPLIER: f32 = 10_000.0;
+/// Damage written into every damage event the player causes, by `one_hit`.
+pub const ONE_HIT_DAMAGE: f32 = 999_999.0;
 
 /// One switch of [`Toggles`], for building the panel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
