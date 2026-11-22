@@ -55,6 +55,8 @@ struct Offsets {
     cast_times: u64,
     carry_weight: u64,
     base_value: u64,
+    /// DominionAttributesComponent arrays caching each attribute's effective value.
+    cached_values: [u64; 2],
 }
 
 struct Game {
@@ -68,6 +70,7 @@ struct Game {
     set_stack: Option<FunctionInfo>,
     update_encumbrance: Option<FunctionInfo>,
     get_attribute: Option<FunctionInfo>,
+    attribute_changed: Option<FunctionInfo>,
     state: Mutex<State>,
 }
 
@@ -129,6 +132,10 @@ pub fn init(objects: u64, names: u64) -> Result<(), String> {
         cast_times: prop("PlayerUtilityMagicComponent", "LastCastTimeBySpellData")?,
         carry_weight: prop("PlayerEncumbranceComponent", "CurrentCarryWeight")?,
         base_value: prop("FloatAttribute", "BaseValue")?,
+        cached_values: [
+            prop("DominionAttributesComponent", "AttributeValues")?,
+            prop("DominionAttributesComponent", "SharedAttributeValues")?,
+        ],
     };
     let game = Game {
         item_class: r.find_type("Item").ok_or("class Item not found")?,
@@ -138,6 +145,7 @@ pub fn init(objects: u64, names: u64) -> Result<(), String> {
         set_stack: func("Item", "SetStackSize"),
         update_encumbrance: func("PlayerEncumbranceComponent", "UpdateEncumberedStatus"),
         get_attribute: func("DominionAttributesComponent", "BP_TryGetFloatAttributeValue"),
+        attribute_changed: func("DominionAttributesComponent", "OnAttributeChanged"),
         r,
         engine,
         off,
@@ -245,6 +253,55 @@ impl Game {
         buf[c..c + 8].copy_from_slice(&class.to_le_bytes());
         engine::call(comp, f, &mut buf);
         (buf[found] != 0).then(|| f32::from_le_bytes(buf[v..v + 4].try_into().unwrap()))
+    }
+
+    /// Sets an attribute whose effective value the game only recomputes on its
+    /// own changes (e.g. a damage multiplier): write the base, tell the game it
+    /// changed, and if the cached value still lags, patch the cache entry.
+    /// Game thread only. Returns how the new value took effect, for the log.
+    fn set_attribute(&self, p: &Player, attr: u64, new: f32) -> &'static str {
+        let old = self.value(p, attr);
+        if !self.set_base(attr, new) {
+            return "base write failed";
+        }
+        if let (Some(comp), Some(f)) = (p.attributes, &self.attribute_changed) {
+            call_with(comp, f, "ObjectProperty", &attr.to_le_bytes());
+            if self.value(p, attr) == Some(new) {
+                return "OnAttributeChanged";
+            }
+        }
+        match (p.attributes, old) {
+            (Some(comp), Some(old)) if self.patch_cached(comp, attr, old, new) => "cache patched",
+            _ => "NOT applied (cached value unchanged)",
+        }
+    }
+
+    /// Finds the cache entry of `attr` (a pointer to the attribute or its class,
+    /// followed closely by its current value) and overwrites the value.
+    fn patch_cached(&self, comp: u64, attr: u64, old: f32, new: f32) -> bool {
+        let class = self.r.class_of(attr).unwrap_or(0);
+        for arr in self.off.cached_values {
+            let (Some(data), Some(num)) = (MEM.read_u64(comp + arr), MEM.read_i32(comp + arr + 8)) else { continue };
+            let len = (num.clamp(0, 1024) as usize * 0x40).min(0x10000);
+            let mut buf = vec![0u8; len];
+            if len < 16 || !dw_core::Memory::read(&MEM, data, &mut buf) {
+                continue;
+            }
+            for at in (0..len - 8).step_by(8) {
+                let ptr = u64::from_le_bytes(buf[at..at + 8].try_into().unwrap());
+                if ptr != attr && ptr != class {
+                    continue;
+                }
+                for v in (at + 8..(at + 0x20).min(len - 4)).step_by(4) {
+                    let f = f32::from_le_bytes(buf[v..v + 4].try_into().unwrap());
+                    if (f - old).abs() < 1e-4 && crate::mem::write(data + v as u64, new) {
+                        log::line(&format!("cache entry of attribute found: array +{arr:#x}, value at +{:#x} after its pointer", v - at));
+                        return true;
+                    }
+                }
+            }
+        }
+        false
     }
 }
 
@@ -376,18 +433,19 @@ fn one_hit(g: &Game, st: &mut State, t: &Toggles, p: &Player) {
         (true, None) => {
             let Some(orig) = g.base(attr) else { return };
             let before = g.value(p, attr);
-            if g.set_base(attr, features::ONE_HIT_MULTIPLIER) {
-                st.one_hit = Some((attr, orig));
-                log::line(&format!("one hit on: damage x{before:?} -> x{:?} (base {orig})", g.value(p, attr)));
-            }
+            let how = g.set_attribute(p, attr, features::ONE_HIT_MULTIPLIER);
+            st.one_hit = Some((attr, orig));
+            log::line(&format!("one hit on: damage x{before:?} -> x{:?} via {how} (base was {orig})", g.value(p, attr)));
         }
-        (true, Some((a, _))) if g.base(a) != Some(features::ONE_HIT_MULTIPLIER) => {
-            // The game rewrote it (e.g. equipment change): raise it again.
-            g.set_base(a, features::ONE_HIT_MULTIPLIER);
+        (true, Some((a, _))) if g.value(p, a) != Some(features::ONE_HIT_MULTIPLIER) => {
+            // The game recomputed it (e.g. equipment change): raise it again.
+            let how = g.set_attribute(p, a, features::ONE_HIT_MULTIPLIER);
+            note(st, "one hit reapplied", || format!("one hit reapplied via {how}"));
         }
-        (false, Some((a, orig))) if g.set_base(a, orig) => {
+        (false, Some((a, orig))) => {
+            let how = g.set_attribute(p, a, orig);
             st.one_hit = None;
-            log::line(&format!("one hit off: base restored to {orig}"));
+            log::line(&format!("one hit off: restored to {orig} via {how}"));
         }
         _ => {}
     }
