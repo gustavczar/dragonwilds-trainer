@@ -83,6 +83,7 @@ struct Game {
     get_attribute: Option<FunctionInfo>,
     decrease_health: Option<FunctionInfo>,
     is_dead: Option<FunctionInfo>,
+    get_health: Option<FunctionInfo>,
     damage_events: Vec<DamageWatch>,
     state: Mutex<State>,
 }
@@ -186,6 +187,7 @@ pub fn init(objects: u64, names: u64) -> Result<(), String> {
         get_attribute: func("DominionAttributesComponent", "BP_TryGetFloatAttributeValue"),
         decrease_health: func("HealthComponent", "DecreaseHealth"),
         is_dead: func("HealthComponent", "IsDead"),
+        get_health: func("HealthComponent", "GetAuthoritativeHealth"),
         damage_events,
         r,
         engine,
@@ -281,6 +283,16 @@ impl Game {
         })
     }
 
+    /// Health component of any actor: AI characters, buildings and destructibles
+    /// keep it in a native `HealthComponent` field; Blueprint actors list it.
+    fn health_component(&self, actor: u64) -> Option<u64> {
+        let field = self.r.class_of(actor).and_then(|c| self.r.find_property(c, "HealthComponent"));
+        field
+            .and_then(|f| self.ptr(actor, f.offset as u64))
+            .filter(|&hc| self.r.is_a(hc, "HealthComponent"))
+            .or_else(|| self.actor_component(actor, "HealthComponent"))
+    }
+
     fn base(&self, attr: u64) -> Option<f32> {
         MEM.read_f32(attr + self.off.base_value)
     }
@@ -304,6 +316,14 @@ impl Game {
         (buf[found] != 0).then(|| f32::from_le_bytes(buf[v..v + 4].try_into().unwrap()))
     }
 
+}
+
+/// Calls a no-argument game function that returns a float.
+fn returned_f32(obj: u64, f: &FunctionInfo) -> Option<f32> {
+    let at = f.params.iter().find(|p| p.name == "ReturnValue")?.offset as usize;
+    let mut buf = vec![0u8; engine::params_size(f)];
+    engine::call(obj, f, &mut buf);
+    Some(f32::from_le_bytes(buf.get(at..at + 4)?.try_into().ok()?))
 }
 
 /// Calls a game function, putting `value` in its first parameter of type `kind`
@@ -430,9 +450,11 @@ fn immortality(g: &Game, st: &mut State, t: &Toggles, hc: u64) {
 }
 
 /// One hit, layer 1: called from the ProcessEvent detour *before* the game runs
-/// one of the watched damage functions (`engine::WATCHED[index]`), with the
-/// damage event by reference. The health loss comes from the per-type list
-/// (`TypeDamages`), not the `Amount` total, so every entry is raised. Only for
+/// one of the watched damage functions (`engine::WATCHED[index]`). Those are
+/// notifications that get a *copy* of the damage event (editing it changes
+/// nothing, tested 21/11), but they fire before the blow lands: the target's
+/// health is dropped to 1 through the game's own DecreaseHealth, so the real
+/// blow kills it and the game credits the player (kill, XP, loot). Only for
 /// damage the local player caused; the target is also queued for layer 2.
 pub fn before_call(index: usize, obj: u64, params: u64) {
     let Some(g) = GAME.get() else { return };
@@ -452,23 +474,26 @@ pub fn before_call(index: usize, obj: u64, params: u64) {
     let list = event + g.off.type_damages;
     let (data, num) = (MEM.read_u64(list).unwrap_or(0), MEM.read_i32(list + 8).unwrap_or(0).clamp(0, 16) as u64);
     let type_amount = |i: u64| data + i * g.off.type_damage_size + g.off.type_damage_amount;
+    let hc = target.filter(|_| mine && amount > 0.0).and_then(|a| g.health_component(a));
+    let hp = hc.and_then(|hc| g.get_health.as_ref().and_then(|f| returned_f32(hc, f)));
     if st.damage_logged < 5 {
         st.damage_logged += 1;
         let types: Vec<f32> = (0..num).filter_map(|i| MEM.read_f32(type_amount(i))).collect();
         log::line(&format!(
-            "damage via {}: target={} instigator={} amount={amount} types={types:?} mine={mine}",
+            "damage via {}: target={} ({}) instigator={} amount={amount} types={types:?} mine={mine} health={} hp={hp:?}",
             watch.name,
             g.label(Some(obj)),
+            g.label(target),
             g.label(Some(instigator)),
+            g.label(hc),
         ));
     }
     if !mine || amount <= 0.0 {
         return;
     }
-    crate::mem::write(event + g.off.damage_amount, features::ONE_HIT_DAMAGE);
-    if data != 0 {
-        for i in 0..num {
-            crate::mem::write(type_amount(i), features::ONE_HIT_DAMAGE);
+    if let (Some(hc), Some(hp), Some(decrease)) = (hc, hp, &g.decrease_health) {
+        if hp > 1.0 {
+            call_with(hc, decrease, "FloatProperty", &(hp - 1.0).to_le_bytes());
         }
     }
     if let Some(actor) = target.filter(|a| !st.doomed.contains(a)) {
@@ -486,10 +511,10 @@ fn finish_doomed(g: &Game, st: &mut State) {
         if !g.r.is_object(actor) {
             continue;
         }
-        let Some(hc) = g.actor_component(actor, "HealthComponent") else {
+        let Some(hc) = g.health_component(actor) else {
             if st.finishes_logged < 5 {
                 st.finishes_logged += 1;
-                log::line(&format!("finish: no HealthComponent listed on {}", g.label(Some(actor))));
+                log::line(&format!("finish: no HealthComponent on {}", g.label(Some(actor))));
             }
             continue;
         };
@@ -498,6 +523,10 @@ fn finish_doomed(g: &Game, st: &mut State) {
             engine::call(hc, is_dead, &mut buf);
             is_dead.params.iter().find(|p| p.name == "ReturnValue").map(|p| buf[p.offset as usize] != 0)
         };
+        if st.finishes_logged < 5 {
+            st.finishes_logged += 1;
+            log::line(&format!("finish: {} dead={:?}", g.label(Some(actor)), dead(hc)));
+        }
         if dead(hc) != Some(false) {
             continue; // layer 1 already killed it (or the state is unknown)
         }

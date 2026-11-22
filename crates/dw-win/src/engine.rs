@@ -77,15 +77,20 @@ pub fn install(target: u64) -> Result<(), MH_STATUS> {
 unsafe extern "system" fn detour(obj: *mut c_void, func: *mut c_void, params: *mut c_void) {
     // SAFETY: ORIGINAL is set before the hook is enabled.
     let original: ProcessEvent = unsafe { std::mem::transmute(ORIGINAL.load(Ordering::Acquire)) };
+    // SAFETY: plain Win32 getter.
+    let on_game_thread = unsafe { GetCurrentThreadId() } == GAME_THREAD.load(Ordering::Relaxed);
     if let Some(i) = WATCHED.iter().position(|w| w.load(Ordering::Relaxed) == func as usize) {
-        if !params.is_null() && !IN_TICK.get() {
+        if !params.is_null() && on_game_thread && !IN_TICK.get() {
+            // before_call calls game functions while holding the state lock:
+            // IN_TICK keeps the nested ProcessEvent calls from re-entering it or the tick.
+            IN_TICK.set(true);
             let _ = std::panic::catch_unwind(|| crate::game::before_call(i, obj as u64, params as u64));
+            IN_TICK.set(false);
         }
     }
     unsafe { original(obj, func, params) };
 
-    // SAFETY: plain Win32 getters.
-    if unsafe { GetCurrentThreadId() } != GAME_THREAD.load(Ordering::Relaxed) {
+    if !on_game_thread {
         return;
     }
     CALLS.fetch_add(1, Ordering::Relaxed);
