@@ -52,6 +52,9 @@ struct Game {
     set_health: Option<FunctionInfo>,
     set_stack: Option<FunctionInfo>,
     update_encumbrance: Option<FunctionInfo>,
+    get_stamina: Option<FunctionInfo>,
+    get_max_stamina: Option<FunctionInfo>,
+    increase_stamina: Option<FunctionInfo>,
     state: Mutex<State>,
 }
 
@@ -63,6 +66,8 @@ struct Player {
     health: Option<u64>,
     magic: Option<u64>,
     encumbrance: Option<u64>,
+    stamina: Option<u64>,
+    crit: Option<u64>,
     backpack: Option<u64>,
 }
 
@@ -110,6 +115,9 @@ pub fn init(objects: u64, names: u64) -> Result<(), String> {
         set_health: func("HealthComponent", "SetHealth"),
         set_stack: func("Item", "SetStackSize"),
         update_encumbrance: func("PlayerEncumbranceComponent", "UpdateEncumberedStatus"),
+        get_stamina: func("StaminaComponent", "GetStamina"),
+        get_max_stamina: func("StaminaComponent", "GetMaxStamina"),
+        increase_stamina: func("StaminaComponent", "IncreaseStamina"),
         r,
         engine,
         off,
@@ -121,6 +129,9 @@ pub fn init(objects: u64, names: u64) -> Result<(), String> {
         ("SetHealth", &game.set_health),
         ("SetStackSize", &game.set_stack),
         ("UpdateEncumberedStatus", &game.update_encumbrance),
+        ("GetStamina", &game.get_stamina),
+        ("GetMaxStamina", &game.get_max_stamina),
+        ("IncreaseStamina", &game.increase_stamina),
     ] {
         if f.is_none() {
             log::line(&format!("function {name} not found; its feature stays off"));
@@ -165,6 +176,10 @@ impl Game {
                     p.magic = Some(o);
                 } else if p.encumbrance.is_none() && self.r.is_a(o, "PlayerEncumbranceComponent") {
                     p.encumbrance = Some(o);
+                } else if p.stamina.is_none() && self.r.is_a(o, "StaminaComponent") {
+                    p.stamina = Some(o);
+                } else if p.crit.is_none() && self.r.is_a(o, "CriticalHitComponent") {
+                    p.crit = Some(o);
                 }
             } else if outer == pc && p.backpack.is_none() && self.r.is_a(o, BACKPACK_CLASS) {
                 p.backpack = Some(o);
@@ -229,6 +244,9 @@ pub fn tick() {
     if let (true, Some(enc)) = (t.zero_weight, live(p.encumbrance)) {
         carry_weight(g, enc);
     }
+    if let (true, Some(sc)) = (t.infinite_stamina, live(p.stamina)) {
+        stamina(g, sc);
+    }
     if let (true, Some(bag)) = (t.fill_slots || t.free_runes, live(p.backpack)) {
         refill(g, &t, bag);
     }
@@ -288,6 +306,43 @@ fn cooldowns(g: &Game, magic: u64) {
     }
 }
 
+/// Calls a parameterless game function that returns a float.
+fn call_ret_f32(obj: u64, f: &FunctionInfo) -> Option<f32> {
+    let ret = f.params.iter().find(|p| p.name == "ReturnValue" && p.type_name == "FloatProperty")?.offset as usize;
+    let mut buf = vec![0u8; engine::params_size(f)];
+    engine::call(obj, f, &mut buf);
+    Some(f32::from_le_bytes(buf.get(ret..ret + 4)?.try_into().ok()?))
+}
+
+fn stamina(g: &Game, sc: u64) {
+    let (Some(get), Some(get_max), Some(inc)) = (&g.get_stamina, &g.get_max_stamina, &g.increase_stamina) else { return };
+    let (Some(cur), Some(max)) = (call_ret_f32(sc, get), call_ret_f32(sc, get_max)) else { return };
+    if max > 0.0 && cur < max {
+        call_with(sc, inc, "FloatProperty", &(max - cur).to_le_bytes());
+    }
+}
+
+/// Logs the critical-hit attributes as the game holds them, to size the
+/// "always critical" feature on real numbers (scale, per-player or shared).
+fn log_crit(g: &Game, crit: u64) {
+    let Some(class) = g.r.class_of(crit) else { return };
+    let base_value = g.r.find_type("FloatAttribute").and_then(|c| g.r.find_property(c, "BaseValue"));
+    for p in g.r.properties(class).into_iter().chain(g.r.super_of(class).map(|s| g.r.properties(s)).unwrap_or_default()) {
+        match p.type_name.as_str() {
+            "ObjectProperty" if p.name.ends_with("Attribute") => {
+                let attr = g.ptr(crit, p.offset as u64);
+                let val = attr.zip(base_value.as_ref()).and_then(|(a, bv)| MEM.read_f32(a + bv.offset as u64));
+                let owner = attr.and_then(|a| g.r.outer_of(a)).and_then(|o| g.r.object_name(o));
+                log::line(&format!("crit {} = {val:?} ({} outer={owner:?})", p.name, g.label(attr)));
+            }
+            "FloatProperty" => {
+                log::line(&format!("crit {} = {:?}", p.name, MEM.read_f32(crit + p.offset as u64)));
+            }
+            _ => {}
+        }
+    }
+}
+
 /// The game caches the carried total; zero it and let the game re-check the penalty.
 fn carry_weight(g: &Game, enc: u64) {
     let at = enc + g.off.carry_weight;
@@ -338,13 +393,18 @@ pub fn player_pass() {
     }
     let p = g.find_player(pc, pawn);
     log::line(&format!(
-        "player: pawn={} health={} magic={} encumbrance={} backpack={}",
+        "player: pawn={} health={} magic={} encumbrance={} stamina={} crit={} backpack={}",
         g.label(Some(pawn)),
         g.label(p.health),
         g.label(p.magic),
         g.label(p.encumbrance),
+        g.label(p.stamina),
+        g.label(p.crit),
         g.label(p.backpack)
     ));
+    if let Some(crit) = p.crit {
+        log_crit(g, crit);
+    }
     if let Some(bag) = p.backpack {
         let num = MEM.read_i32(bag + g.off.item_slots + 8).unwrap_or(-1);
         log::line(&format!("backpack slots: {num}"));

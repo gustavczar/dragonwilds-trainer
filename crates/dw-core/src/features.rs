@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-/// The switches shown in the in-game panel and stored in `trainer.toml`.
+/// The switches shown in the in-game panel and stored in `settings.json`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Toggles {
@@ -12,15 +12,24 @@ pub struct Toggles {
     pub no_cooldown: bool,
     /// Keep backpack slots 37-39 and the first ammo slot full.
     pub fill_slots: bool,
-    /// The player cannot die. Off by default on purpose.
+    /// Health bar kept full and the player cannot die. Off by default on purpose.
     pub infinite_health: bool,
+    /// Stamina kept full.
+    pub infinite_stamina: bool,
     /// Carried items weigh nothing.
     pub zero_weight: bool,
 }
 
 impl Default for Toggles {
     fn default() -> Self {
-        Self { free_runes: true, no_cooldown: true, fill_slots: true, infinite_health: false, zero_weight: true }
+        Self {
+            free_runes: true,
+            no_cooldown: true,
+            fill_slots: true,
+            infinite_health: false,
+            infinite_stamina: true,
+            zero_weight: true,
+        }
     }
 }
 
@@ -31,12 +40,19 @@ pub enum Feature {
     NoCooldown,
     FillSlots,
     InfiniteHealth,
+    InfiniteStamina,
     ZeroWeight,
 }
 
 impl Feature {
-    pub const ALL: [Feature; 5] =
-        [Feature::FreeRunes, Feature::NoCooldown, Feature::FillSlots, Feature::InfiniteHealth, Feature::ZeroWeight];
+    pub const ALL: [Feature; 6] = [
+        Feature::FreeRunes,
+        Feature::NoCooldown,
+        Feature::FillSlots,
+        Feature::InfiniteHealth,
+        Feature::InfiniteStamina,
+        Feature::ZeroWeight,
+    ];
 
     pub fn label(self, lang: Lang) -> &'static str {
         match (self, lang) {
@@ -48,6 +64,8 @@ impl Feature {
             (Feature::FillSlots, Lang::PtBr) => "Slots cheios (37-39, munição)",
             (Feature::InfiniteHealth, Lang::En) => "Infinite health",
             (Feature::InfiniteHealth, Lang::PtBr) => "Vida infinita",
+            (Feature::InfiniteStamina, Lang::En) => "Infinite stamina",
+            (Feature::InfiniteStamina, Lang::PtBr) => "Stamina infinita",
             (Feature::ZeroWeight, Lang::En) => "Zero weight",
             (Feature::ZeroWeight, Lang::PtBr) => "Peso zero",
         }
@@ -59,6 +77,7 @@ impl Feature {
             Feature::NoCooldown => t.no_cooldown,
             Feature::FillSlots => t.fill_slots,
             Feature::InfiniteHealth => t.infinite_health,
+            Feature::InfiniteStamina => t.infinite_stamina,
             Feature::ZeroWeight => t.zero_weight,
         }
     }
@@ -69,6 +88,7 @@ impl Feature {
             Feature::NoCooldown => t.no_cooldown = on,
             Feature::FillSlots => t.fill_slots = on,
             Feature::InfiniteHealth => t.infinite_health = on,
+            Feature::InfiniteStamina => t.infinite_stamina = on,
             Feature::ZeroWeight => t.zero_weight = on,
         }
     }
@@ -184,6 +204,25 @@ mod tests {
 
         let off = Toggles { free_runes: false, fill_slots: false, ..Toggles::default() };
         assert!(fills(&off, inv).is_empty());
+    }
+
+    #[test]
+    fn every_feature_round_trips_through_its_switch() {
+        for f in Feature::ALL {
+            let mut t = Toggles::default();
+            f.set(&mut t, true);
+            assert!(f.get(&t), "{f:?} on");
+            f.set(&mut t, false);
+            assert!(!f.get(&t), "{f:?} off");
+            assert!(!f.label(Lang::PtBr).is_empty() && !f.label(Lang::En).is_empty());
+        }
+    }
+
+    #[test]
+    fn settings_saved_before_a_new_feature_get_its_default() {
+        let t: Toggles = serde_json::from_str(r#"{"free_runes": false}"#).unwrap();
+        assert!(!t.free_runes, "saved choice kept");
+        assert!(t.infinite_stamina, "new switch takes its default");
     }
 
     #[test]

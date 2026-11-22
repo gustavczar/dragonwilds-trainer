@@ -67,7 +67,7 @@ fn find_game() -> Option<(u32, u64)> {
         }
         let mut m: MODULEENTRY32W = std::mem::zeroed();
         m.dwSize = std::mem::size_of::<MODULEENTRY32W>() as u32;
-        let base = (Module32FirstW(snap, &mut m) != 0).then(|| m.modBaseAddr as u64);
+        let base = (Module32FirstW(snap, &mut m) != 0).then_some(m.modBaseAddr as u64);
         CloseHandle(snap);
         Some((pid, base?))
     }
