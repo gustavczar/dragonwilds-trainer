@@ -6,6 +6,7 @@ use crate::{game, settings};
 use dw_core::features::{Feature, Lang};
 use hudhook::imgui::{Condition, Io, Ui, WindowFlags};
 use hudhook::{ImguiRenderLoop, MessageFilter};
+use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_ESCAPE};
 use windows_sys::Win32::UI::WindowsAndMessaging::{GetCursorInfo, CURSORINFO, CURSOR_SHOWING};
@@ -91,13 +92,24 @@ impl ImguiRenderLoop for Panel {
                     }
                 }
                 ui.separator();
-                let found = game::PLAYER_FOUND.load(std::sync::atomic::Ordering::Relaxed);
-                ui.text_disabled(match (found, s.lang) {
-                    (true, Lang::PtBr) => "Jogador encontrado",
-                    (true, Lang::En) => "Player found",
-                    (false, Lang::PtBr) => "Aguardando o mundo carregar",
-                    (false, Lang::En) => "Waiting for the world to load",
+                let found = game::PLAYER_FOUND.load(Ordering::Relaxed);
+                let shared = game::PLAYERS.load(Ordering::Relaxed) > 1;
+                ui.text_disabled(match (shared, found, s.lang) {
+                    (true, _, Lang::PtBr) => "Outros jogadores no mundo: pausado (só single player)",
+                    (true, _, Lang::En) => "Other players in this world: paused (single player only)",
+                    (false, true, Lang::PtBr) => "Jogador encontrado",
+                    (false, true, Lang::En) => "Player found",
+                    (false, false, Lang::PtBr) => "Aguardando o mundo carregar",
+                    (false, false, Lang::En) => "Waiting for the world to load",
                 });
+                for (lang, name) in [(Lang::En, "English"), (Lang::PtBr, "Português")] {
+                    if ui.radio_button_bool(name, s.lang == lang) && s.lang != lang {
+                        s.lang = lang;
+                        changed = true;
+                    }
+                    ui.same_line();
+                }
+                ui.new_line();
             });
         if changed {
             settings::set(s);

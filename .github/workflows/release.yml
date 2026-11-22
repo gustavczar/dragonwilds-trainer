@@ -1,0 +1,36 @@
+# Builds version.dll from the tagged source on GitHub's own runner, so every
+# release binary can be traced back to this repository (see "Verify" in the README).
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install stable --profile minimal && rustup default stable
+      - run: cargo test --workspace --release
+      - run: cargo build -p dw-win --release
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory dist | Out-Null
+          Copy-Item target/release/version.dll dist/
+          $hash = (Get-FileHash dist/version.dll -Algorithm SHA256).Hash.ToLower()
+          "$hash  version.dll" | Set-Content dist/SHA256SUMS.txt -Encoding ascii
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: dist/version.dll
+      - name: Publish
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create $env:GITHUB_REF_NAME dist/version.dll dist/SHA256SUMS.txt --title "dragonwilds-trainer $env:GITHUB_REF_NAME" --notes-file .github/release-notes.md

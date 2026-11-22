@@ -10,7 +10,7 @@ pub struct Toggles {
     pub free_runes: bool,
     /// Spells are ready again right after being cast.
     pub no_cooldown: bool,
-    /// Keep backpack slots 37-39 and the first ammo slot full.
+    /// Keep the last backpack row (slots 32-39) and the first ammo slot full.
     pub fill_slots: bool,
     /// Health bar kept full and the player cannot die. Off by default on purpose.
     pub infinite_health: bool,
@@ -39,7 +39,27 @@ impl Default for Toggles {
     }
 }
 
-/// Damage written into every damage event the player causes, by `one_hit`.
+impl Toggles {
+    /// Every feature off.
+    pub const OFF: Toggles = Toggles {
+        free_runes: false,
+        no_cooldown: false,
+        fill_slots: false,
+        infinite_health: false,
+        infinite_stamina: false,
+        infinite_special: false,
+        one_hit: false,
+        zero_weight: false,
+    };
+}
+
+/// Jagex's Community Modding Guidelines allow cheats in single player only, so
+/// every feature switches off while anyone else is in the world.
+pub fn solo_only(t: Toggles, players: usize) -> Toggles {
+    if players > 1 { Toggles::OFF } else { t }
+}
+
+/// Damage `one_hit` uses to finish a target the player hit.
 pub const ONE_HIT_DAMAGE: f32 = 999_999.0;
 
 /// One switch of [`Toggles`], for building the panel.
@@ -117,9 +137,9 @@ impl Feature {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum Lang {
+    #[default]
     #[serde(rename = "en")]
     En,
-    #[default]
     #[serde(rename = "pt-BR")]
     PtBr,
 }
@@ -235,6 +255,15 @@ mod tests {
         let t: Toggles = serde_json::from_str(r#"{"free_runes": false}"#).unwrap();
         assert!(!t.free_runes, "saved choice kept");
         assert!(t.infinite_stamina, "new switch takes its default");
+    }
+
+    #[test]
+    fn everything_turns_off_while_others_are_in_the_world() {
+        let t = Toggles { one_hit: true, ..Toggles::default() };
+        assert_eq!(solo_only(t, 0), t, "world still loading");
+        assert_eq!(solo_only(t, 1), t, "alone");
+        assert_eq!(solo_only(t, 2), Toggles::OFF);
+        assert!(Feature::ALL.iter().all(|f| !f.get(&Toggles::OFF)), "OFF covers every switch");
     }
 
     #[test]

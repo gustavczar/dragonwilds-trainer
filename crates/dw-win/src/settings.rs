@@ -4,12 +4,25 @@ use dw_core::features::Lang;
 use dw_core::Toggles;
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
+use windows_sys::Win32::Globalization::GetUserDefaultUILanguage;
 
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+/// Primary language id of Portuguese (Brazil and Portugal).
+const LANG_PORTUGUESE: u16 = 0x16;
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
     pub toggles: Toggles,
     pub lang: Lang,
+}
+
+impl Default for Settings {
+    /// Until the player picks one, the panel follows the Windows display language.
+    fn default() -> Self {
+        // SAFETY: plain Win32 getter.
+        let primary = unsafe { GetUserDefaultUILanguage() } & 0x3ff;
+        Self { toggles: Toggles::default(), lang: if primary == LANG_PORTUGUESE { Lang::PtBr } else { Lang::En } }
+    }
 }
 
 static CURRENT: Mutex<Option<Settings>> = Mutex::new(None);

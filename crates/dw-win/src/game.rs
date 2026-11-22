@@ -12,7 +12,7 @@ use crate::{engine, log, mem::InProcess, settings};
 use dw_core::features::{self, SlotState};
 use dw_core::{FunctionInfo, MemoryExt, Reflection, Toggles};
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 static MEM: InProcess = InProcess;
@@ -20,6 +20,8 @@ static GAME: OnceLock<Game> = OnceLock::new();
 static PAUSED: AtomicBool = AtomicBool::new(false);
 /// Shown in the panel: the player's components were found.
 pub static PLAYER_FOUND: AtomicBool = AtomicBool::new(false);
+/// Players in the current world (GameState.PlayerArray), from the background pass.
+pub static PLAYERS: AtomicUsize = AtomicUsize::new(0);
 
 /// A spell's last-cast time is written this far in the past (float seconds).
 const LONG_AGO: f32 = -1.0e9;
@@ -42,6 +44,8 @@ struct Offsets {
     viewport: u64,
     world: u64,
     game_instance: u64,
+    game_state: u64,
+    player_array: u64,
     local_players: u64,
     player_controller: u64,
     pawn: u64,
@@ -138,6 +142,8 @@ pub fn init(objects: u64, names: u64) -> Result<(), String> {
         viewport: prop("Engine", "GameViewport")?,
         world: prop("GameViewportClient", "World")?,
         game_instance: prop("World", "OwningGameInstance")?,
+        game_state: prop("World", "GameState")?,
+        player_array: prop("GameStateBase", "PlayerArray")?,
         local_players: prop("GameInstance", "LocalPlayers")?,
         player_controller: prop("Player", "PlayerController")?,
         pawn: prop("Controller", "Pawn")?,
@@ -227,6 +233,14 @@ impl Game {
         let lp = self.ptr(players, 0)?;
         let pc = self.ptr(lp, o.player_controller)?;
         Some((pc, self.ptr(pc, o.pawn)?))
+    }
+
+    /// Players in the world the local player is in.
+    fn player_count(&self) -> Option<usize> {
+        let o = &self.off;
+        let world = self.ptr(self.ptr(self.engine, o.viewport)?, o.world)?;
+        let gs = self.ptr(world, o.game_state)?;
+        Some(MEM.read_i32(gs + o.player_array + 8)?.max(0) as usize)
     }
 
     /// Components and attributes are subobjects of their actor: walk the object
@@ -341,13 +355,18 @@ fn call_with(obj: u64, f: &FunctionInfo, kind: &str, value: &[u8]) {
     engine::call(obj, f, &mut buf);
 }
 
+/// The saved switches, all off while other players share the world.
+fn active_toggles() -> Toggles {
+    features::solo_only(settings::toggles(), PLAYERS.load(Ordering::Relaxed))
+}
+
 /// Game thread, 4x a second.
 pub fn tick() {
     let Some(g) = GAME.get() else { return };
     if PAUSED.load(Ordering::Relaxed) {
         return;
     }
-    let t = settings::toggles();
+    let t = active_toggles();
     let Ok(mut st) = g.state.lock() else { return };
     let Some(p) = st.player.clone() else { return };
     // The pass may be up to 2 s old: drop it if the player changed meanwhile.
@@ -459,7 +478,7 @@ fn immortality(g: &Game, st: &mut State, t: &Toggles, hc: u64) {
 pub fn before_call(index: usize, obj: u64, params: u64) {
     let Some(g) = GAME.get() else { return };
     let Some(watch) = g.damage_events.get(index) else { return };
-    if PAUSED.load(Ordering::Relaxed) || !settings::toggles().one_hit {
+    if PAUSED.load(Ordering::Relaxed) || !active_toggles().one_hit {
         return;
     }
     let Ok(mut st) = g.state.try_lock() else { return };
@@ -610,6 +629,11 @@ pub fn player_pass() {
         PLAYER_FOUND.store(false, Ordering::Relaxed);
         return;
     };
+    if let Some(n) = g.player_count() {
+        if PLAYERS.swap(n, Ordering::Relaxed) != n {
+            log::line(&format!("players in world: {n}{}", if n > 1 { " (others present: features off)" } else { "" }));
+        }
+    }
     let known = g.state.lock().ok().and_then(|st| st.player.as_ref().map(|p| (p.pc, p.pawn)));
     if known == Some((pc, pawn)) {
         return;
@@ -647,7 +671,7 @@ pub fn weights_pass() {
     if PAUSED.load(Ordering::Relaxed) {
         return;
     }
-    let on = settings::toggles().zero_weight;
+    let on = active_toggles().zero_weight;
     let Ok(mut st) = g.state.lock() else { return };
     if !on {
         for (obj, w) in st.weights.drain() {
