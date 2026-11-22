@@ -25,7 +25,8 @@ jobs:
           New-Item -ItemType Directory dist | Out-Null
           Copy-Item target/release/version.dll dist/
           $hash = (Get-FileHash dist/version.dll -Algorithm SHA256).Hash.ToLower()
-          "$hash  version.dll" | Set-Content dist/SHA256SUMS.txt -Encoding ascii
+          # LF only, so `sha256sum -c` works everywhere
+          [IO.File]::WriteAllText("$PWD/dist/SHA256SUMS.txt", "$hash  version.dll`n")
       - uses: actions/attest-build-provenance@v4
         with:
           subject-path: dist/version.dll
