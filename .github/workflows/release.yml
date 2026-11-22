@@ -15,7 +15,7 @@ jobs:
   release:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: rustup toolchain install stable --profile minimal && rustup default stable
       - run: cargo test --workspace --release
       - run: cargo build -p dw-win --release
@@ -26,7 +26,7 @@ jobs:
           Copy-Item target/release/version.dll dist/
           $hash = (Get-FileHash dist/version.dll -Algorithm SHA256).Hash.ToLower()
           "$hash  version.dll" | Set-Content dist/SHA256SUMS.txt -Encoding ascii
-      - uses: actions/attest-build-provenance@v2
+      - uses: actions/attest-build-provenance@v4
         with:
           subject-path: dist/version.dll
       - name: Publish
