@@ -55,6 +55,12 @@ struct Offsets {
     base_value: u64,
     damage_amount: u64,
     damage_instigator: u64,
+    /// TArray<TypeDamage> inside the damage event (event + TypeDamagesArray + TypeDamages).
+    type_damages: u64,
+    type_damage_amount: u64,
+    type_damage_size: u64,
+    /// AActor arrays listing an actor's components.
+    actor_components: [u64; 2],
 }
 
 /// A damage function whose parameters carry a DominionDamageEvent.
@@ -75,6 +81,8 @@ struct Game {
     set_stack: Option<FunctionInfo>,
     update_encumbrance: Option<FunctionInfo>,
     get_attribute: Option<FunctionInfo>,
+    decrease_health: Option<FunctionInfo>,
+    is_dead: Option<FunctionInfo>,
     damage_events: Vec<DamageWatch>,
     state: Mutex<State>,
 }
@@ -100,6 +108,9 @@ struct State {
     immortal: Option<u64>,
     /// Damage events logged for the current player (the first few, as evidence).
     damage_logged: u32,
+    /// Actors the player hit with one hit on; the next tick finishes any still alive.
+    doomed: Vec<u64>,
+    finishes_logged: u32,
     /// Original weight of every ItemData we zeroed.
     weights: HashMap<u64, f32>,
     /// One-time log lines already written for the current player.
@@ -139,6 +150,14 @@ pub fn init(objects: u64, names: u64) -> Result<(), String> {
         base_value: prop("FloatAttribute", "BaseValue")?,
         damage_amount: prop("DominionDamageEvent", "Amount")?,
         damage_instigator: prop("DominionDamageEvent", "Instigator")?,
+        type_damages: prop("DominionDamageEvent", "TypeDamagesArray")? + prop("TypeDamageArray", "TypeDamages")?,
+        type_damage_amount: prop("TypeDamage", "Amount")?,
+        type_damage_size: r
+            .find_type("TypeDamage")
+            .and_then(|s| MEM.read_i32(s + r.layout.ustruct_size))
+            .filter(|&n| n > 0)
+            .ok_or("TypeDamage size not readable")? as u64,
+        actor_components: [prop("Actor", "BlueprintCreatedComponents")?, prop("Actor", "InstanceComponents")?],
     };
     // Damage functions run through ProcessEvent with the event by reference:
     // the "will receive" Blueprint events first, the multicasts as a backup.
@@ -165,6 +184,8 @@ pub fn init(objects: u64, names: u64) -> Result<(), String> {
         set_stack: func("Item", "SetStackSize"),
         update_encumbrance: func("PlayerEncumbranceComponent", "UpdateEncumberedStatus"),
         get_attribute: func("DominionAttributesComponent", "BP_TryGetFloatAttributeValue"),
+        decrease_health: func("HealthComponent", "DecreaseHealth"),
+        is_dead: func("HealthComponent", "IsDead"),
         damage_events,
         r,
         engine,
@@ -252,6 +273,14 @@ impl Game {
         false
     }
 
+    /// First component of `actor` that is a `class`, from the actor's component arrays.
+    fn actor_component(&self, actor: u64, class: &str) -> Option<u64> {
+        self.off.actor_components.iter().find_map(|&arr| {
+            let (data, num) = (MEM.read_u64(actor + arr)?, MEM.read_i32(actor + arr + 8)?);
+            (0..num.clamp(0, 256) as u64).find_map(|i| MEM.read_u64(data + i * 8).filter(|&c| self.r.is_object(c) && self.r.is_a(c, class)))
+        })
+    }
+
     fn base(&self, attr: u64) -> Option<f32> {
         MEM.read_f32(attr + self.off.base_value)
     }
@@ -321,6 +350,9 @@ pub fn tick() {
     }
     if t.infinite_special {
         top_up(g, &mut st, &p, "SpecialChargeAttribute", "MaxSpecialChargeAttribute");
+    }
+    if t.one_hit && !st.doomed.is_empty() {
+        finish_doomed(g, &mut st);
     }
     if let (true, Some(magic)) = (t.no_cooldown, live(p.magic)) {
         cooldowns(g, magic);
@@ -397,10 +429,11 @@ fn immortality(g: &Game, st: &mut State, t: &Toggles, hc: u64) {
     }
 }
 
-/// One hit: called from the ProcessEvent detour *before* the game runs one of
-/// the watched damage functions (`engine::WATCHED[index]`). The damage event is
-/// passed by reference, so raising its `Amount` here is the damage the game
-/// applies. Only for damage the local player caused.
+/// One hit, layer 1: called from the ProcessEvent detour *before* the game runs
+/// one of the watched damage functions (`engine::WATCHED[index]`), with the
+/// damage event by reference. The health loss comes from the per-type list
+/// (`TypeDamages`), not the `Amount` total, so every entry is raised. Only for
+/// damage the local player caused; the target is also queued for layer 2.
 pub fn before_call(index: usize, obj: u64, params: u64) {
     let Some(g) = GAME.get() else { return };
     let Some(watch) = g.damage_events.get(index) else { return };
@@ -414,19 +447,65 @@ pub fn before_call(index: usize, obj: u64, params: u64) {
     let Some(amount) = MEM.read_f32(event + g.off.damage_amount) else { return };
     // Damage the player causes to something else; never to the player (fall damage
     // can name the player as its own instigator).
-    let target_is_player = g.r.outer_of(obj) == Some(pawn);
-    let mine = instigator != 0 && (instigator == pawn || instigator == pc) && !target_is_player;
+    let target = g.r.outer_of(obj);
+    let mine = instigator != 0 && (instigator == pawn || instigator == pc) && target != Some(pawn);
+    let list = event + g.off.type_damages;
+    let (data, num) = (MEM.read_u64(list).unwrap_or(0), MEM.read_i32(list + 8).unwrap_or(0).clamp(0, 16) as u64);
+    let type_amount = |i: u64| data + i * g.off.type_damage_size + g.off.type_damage_amount;
     if st.damage_logged < 5 {
         st.damage_logged += 1;
+        let types: Vec<f32> = (0..num).filter_map(|i| MEM.read_f32(type_amount(i))).collect();
         log::line(&format!(
-            "damage via {}: target={} instigator={} amount={amount} mine={mine}",
+            "damage via {}: target={} instigator={} amount={amount} types={types:?} mine={mine}",
             watch.name,
             g.label(Some(obj)),
             g.label(Some(instigator)),
         ));
     }
-    if mine && amount > 0.0 && amount < features::ONE_HIT_DAMAGE {
-        crate::mem::write(event + g.off.damage_amount, features::ONE_HIT_DAMAGE);
+    if !mine || amount <= 0.0 {
+        return;
+    }
+    crate::mem::write(event + g.off.damage_amount, features::ONE_HIT_DAMAGE);
+    if data != 0 {
+        for i in 0..num {
+            crate::mem::write(type_amount(i), features::ONE_HIT_DAMAGE);
+        }
+    }
+    if let Some(actor) = target.filter(|a| !st.doomed.contains(a)) {
+        if st.doomed.len() < 32 {
+            st.doomed.push(actor);
+        }
+    }
+}
+
+/// One hit, layer 2 (game thread): any actor the player hit that is still
+/// alive gets its health component's DecreaseHealth(999999).
+fn finish_doomed(g: &Game, st: &mut State) {
+    let (Some(decrease), Some(is_dead)) = (&g.decrease_health, &g.is_dead) else { return };
+    for actor in std::mem::take(&mut st.doomed) {
+        if !g.r.is_object(actor) {
+            continue;
+        }
+        let Some(hc) = g.actor_component(actor, "HealthComponent") else {
+            if st.finishes_logged < 5 {
+                st.finishes_logged += 1;
+                log::line(&format!("finish: no HealthComponent listed on {}", g.label(Some(actor))));
+            }
+            continue;
+        };
+        let dead = |hc: u64| {
+            let mut buf = vec![0u8; engine::params_size(is_dead)];
+            engine::call(hc, is_dead, &mut buf);
+            is_dead.params.iter().find(|p| p.name == "ReturnValue").map(|p| buf[p.offset as usize] != 0)
+        };
+        if dead(hc) != Some(false) {
+            continue; // layer 1 already killed it (or the state is unknown)
+        }
+        call_with(hc, decrease, "FloatProperty", &features::ONE_HIT_DAMAGE.to_le_bytes());
+        if st.finishes_logged < 5 {
+            st.finishes_logged += 1;
+            log::line(&format!("finish: {} still alive after the hit; DecreaseHealth -> dead={:?}", g.label(Some(actor)), dead(hc)));
+        }
     }
 }
 
@@ -478,6 +557,22 @@ fn refill(g: &Game, t: &Toggles, bag: u64) {
     }
 }
 
+/// One log line per occupied slot in `range`: item, count and the item's max.
+fn log_slots(g: &Game, bag: u64, range: std::ops::RangeInclusive<usize>) {
+    let slots = bag + g.off.item_slots;
+    let (Some(data), Some(num)) = (MEM.read_u64(slots), MEM.read_i32(slots + 8)) else { return };
+    for slot in range.filter(|&s| (s as i32) < num) {
+        let Some(item) = MEM.read_u64(data + slot as u64 * 8).filter(|&i| g.r.is_object(i)) else { continue };
+        let idata = g.ptr(item, g.off.item_data);
+        log::line(&format!(
+            "slot {slot}: {} count={:?} max={:?}",
+            idata.and_then(|d| g.r.object_name(d)).unwrap_or_else(|| "?".into()),
+            MEM.read_i32(item + g.off.item_count),
+            idata.and_then(|d| MEM.read_i32(d + g.off.max_stack)),
+        ));
+    }
+}
+
 /// Background thread, every 2 s: (re)finds the player's components and
 /// attributes when the player changes (world load, respawn), and logs them.
 pub fn player_pass() {
@@ -501,11 +596,16 @@ pub fn player_pass() {
         p.attrs.len(),
         g.label(p.backpack)
     ));
+    if let Some(bag) = p.backpack {
+        log_slots(g, bag, 24..=48);
+    }
     PLAYER_FOUND.store(p.health.is_some() || p.backpack.is_some(), Ordering::Relaxed);
     if let Ok(mut st) = g.state.lock() {
         // A new pawn: log its values and damage events again.
         st.noted.clear();
         st.damage_logged = 0;
+        st.finishes_logged = 0;
+        st.doomed.clear();
         st.player = Some(p);
     }
 }
