@@ -37,6 +37,8 @@ struct Offsets {
     item_slots: u64,
     cast_times: u64,
     carry_weight: u64,
+    max_health: u64,
+    health: u64,
 }
 
 struct Game {
@@ -47,6 +49,7 @@ struct Game {
     item_data_class: u64,
     set_immortal: Option<FunctionInfo>,
     set_can_die: Option<FunctionInfo>,
+    set_health: Option<FunctionInfo>,
     set_stack: Option<FunctionInfo>,
     update_encumbrance: Option<FunctionInfo>,
     state: Mutex<State>,
@@ -96,12 +99,15 @@ pub fn init(objects: u64, names: u64) -> Result<(), String> {
         item_slots: prop("InventoryComponent", "ItemSlots")?,
         cast_times: prop("PlayerUtilityMagicComponent", "LastCastTimeBySpellData")?,
         carry_weight: prop("PlayerEncumbranceComponent", "CurrentCarryWeight")?,
+        max_health: prop("HealthComponent", "MaxHealth")?,
+        health: prop("HealthComponent", "AuthoritativeHealth")?,
     };
     let game = Game {
         item_class: r.find_type("Item").ok_or("class Item not found")?,
         item_data_class: r.find_type("ItemData").ok_or("class ItemData not found")?,
         set_immortal: func("HealthComponent", "SetIsImmortal"),
         set_can_die: func("HealthComponent", "SetCanDie"),
+        set_health: func("HealthComponent", "SetHealth"),
         set_stack: func("Item", "SetStackSize"),
         update_encumbrance: func("PlayerEncumbranceComponent", "UpdateEncumberedStatus"),
         r,
@@ -112,6 +118,7 @@ pub fn init(objects: u64, names: u64) -> Result<(), String> {
     for (name, f) in [
         ("SetIsImmortal", &game.set_immortal),
         ("SetCanDie", &game.set_can_die),
+        ("SetHealth", &game.set_health),
         ("SetStackSize", &game.set_stack),
         ("UpdateEncumberedStatus", &game.update_encumbrance),
     ] {
@@ -227,23 +234,45 @@ pub fn tick() {
     }
 }
 
+/// `SetIsImmortal(bValue, LockerObj) -> bool`: the game counts immortality per
+/// locker object, so the request must name one and the release must use the
+/// same one. The health component itself is our locker.
+fn set_immortal(hc: u64, f: &FunctionInfo, on: bool) -> Option<bool> {
+    let mut buf = vec![0u8; engine::params_size(f)];
+    let param = |name: &str| f.params.iter().find(|p| p.name == name).map(|p| p.offset as usize);
+    buf[param("bValue")?] = on as u8;
+    let locker = param("LockerObj")?;
+    buf[locker..locker + 8].copy_from_slice(&hc.to_le_bytes());
+    engine::call(hc, f, &mut buf);
+    param("ReturnValue").map(|r| buf[r] != 0)
+}
+
 fn health(g: &Game, st: &mut State, t: &Toggles, hc: u64) {
     let (Some(immortal), Some(can_die)) = (&g.set_immortal, &g.set_can_die) else { return };
     // Only undo what we did: never clear an immortality the game set itself.
     match (t.infinite_health, st.immortal == Some(hc)) {
         (true, false) => {
-            call_with(hc, immortal, "BoolProperty", &[1]);
+            let accepted = set_immortal(hc, immortal, true);
             call_with(hc, can_die, "BoolProperty", &[0]);
             st.immortal = Some(hc);
-            log::line("infinite health on");
+            log::line(&format!("infinite health on (immortal accepted: {accepted:?})"));
         }
         (false, true) => {
-            call_with(hc, immortal, "BoolProperty", &[0]);
+            let accepted = set_immortal(hc, immortal, false);
             call_with(hc, can_die, "BoolProperty", &[1]);
             st.immortal = None;
-            log::line("infinite health off");
+            log::line(&format!("infinite health off (release accepted: {accepted:?})"));
         }
         _ => {}
+    }
+    // Immortal only stops death; keep the bar full as well.
+    if t.infinite_health {
+        if let Some(set_health) = &g.set_health {
+            let (Some(max), Some(cur)) = (MEM.read_f32(hc + g.off.max_health), MEM.read_f32(hc + g.off.health)) else { return };
+            if max > 0.0 && cur < max {
+                call_with(hc, set_health, "FloatProperty", &max.to_le_bytes());
+            }
+        }
     }
 }
 

@@ -121,12 +121,15 @@ fn start(r: &Reflection<'_, mem::InProcess>, objects: u64, names: u64, base: u64
     std::thread::sleep(Duration::from_secs(5));
     log::line(&format!("game-thread ProcessEvent calls in 5s: {}", engine::CALLS.load(Ordering::Relaxed)));
 
+    // Runs for the life of the game: player lookup every 2 s, weights every 20 s.
     std::thread::spawn(|| {
-        for n in 0u64.. {
+        let mut n = 0u64;
+        loop {
             let _ = std::panic::catch_unwind(game::player_pass);
             if n % 10 == 0 {
                 let _ = std::panic::catch_unwind(game::weights_pass);
             }
+            n = n.wrapping_add(1);
             std::thread::sleep(Duration::from_secs(2));
         }
     });
