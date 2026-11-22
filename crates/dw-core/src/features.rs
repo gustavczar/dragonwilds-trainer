@@ -16,6 +16,10 @@ pub struct Toggles {
     pub infinite_health: bool,
     /// Stamina kept full.
     pub infinite_stamina: bool,
+    /// Special charge (the blue bar used by special abilities) kept full.
+    pub infinite_special: bool,
+    /// Every attack, any weapon or spell, deals overwhelming damage. Off by default.
+    pub one_hit: bool,
     /// Carried items weigh nothing.
     pub zero_weight: bool,
 }
@@ -28,10 +32,15 @@ impl Default for Toggles {
             fill_slots: true,
             infinite_health: false,
             infinite_stamina: true,
+            infinite_special: true,
+            one_hit: false,
             zero_weight: true,
         }
     }
 }
+
+/// Multiplier written to the player's all-combat-styles damage attribute by `one_hit`.
+pub const ONE_HIT_MULTIPLIER: f32 = 10_000.0;
 
 /// One switch of [`Toggles`], for building the panel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,16 +50,20 @@ pub enum Feature {
     FillSlots,
     InfiniteHealth,
     InfiniteStamina,
+    InfiniteSpecial,
+    OneHit,
     ZeroWeight,
 }
 
 impl Feature {
-    pub const ALL: [Feature; 6] = [
+    pub const ALL: [Feature; 8] = [
         Feature::FreeRunes,
         Feature::NoCooldown,
         Feature::FillSlots,
         Feature::InfiniteHealth,
         Feature::InfiniteStamina,
+        Feature::InfiniteSpecial,
+        Feature::OneHit,
         Feature::ZeroWeight,
     ];
 
@@ -66,6 +79,10 @@ impl Feature {
             (Feature::InfiniteHealth, Lang::PtBr) => "Vida infinita",
             (Feature::InfiniteStamina, Lang::En) => "Infinite stamina",
             (Feature::InfiniteStamina, Lang::PtBr) => "Stamina infinita",
+            (Feature::InfiniteSpecial, Lang::En) => "Infinite special charge",
+            (Feature::InfiniteSpecial, Lang::PtBr) => "Barra azul infinita",
+            (Feature::OneHit, Lang::En) => "One hit (any weapon or spell)",
+            (Feature::OneHit, Lang::PtBr) => "One Hit (qualquer arma ou magia)",
             (Feature::ZeroWeight, Lang::En) => "Zero weight",
             (Feature::ZeroWeight, Lang::PtBr) => "Peso zero",
         }
@@ -78,6 +95,8 @@ impl Feature {
             Feature::FillSlots => t.fill_slots,
             Feature::InfiniteHealth => t.infinite_health,
             Feature::InfiniteStamina => t.infinite_stamina,
+            Feature::InfiniteSpecial => t.infinite_special,
+            Feature::OneHit => t.one_hit,
             Feature::ZeroWeight => t.zero_weight,
         }
     }
@@ -89,6 +108,8 @@ impl Feature {
             Feature::FillSlots => t.fill_slots = on,
             Feature::InfiniteHealth => t.infinite_health = on,
             Feature::InfiniteStamina => t.infinite_stamina = on,
+            Feature::InfiniteSpecial => t.infinite_special = on,
+            Feature::OneHit => t.one_hit = on,
             Feature::ZeroWeight => t.zero_weight = on,
         }
     }
