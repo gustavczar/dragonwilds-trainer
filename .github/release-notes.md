@@ -6,7 +6,9 @@
 3. Start the game. A card in the top-right corner shows the trainer loading and says **Ready** when it is done.
 4. Load your world and press `Esc`: click the **DW** icon in the top-right corner.
 
-**Known:** enemies killed with *One hit* seem to drop no loot. Switch it off when you want the drops.
+### New in this version
+- **Free build**: building pieces you have already unlocked cost no materials. Off by default.
+- **One hit** kills now drop their loot.
 
 To uninstall, delete `version.dll` and the `dw-trainer` folder next to it.
 `SHA256SUMS.txt` holds the file's checksum; `gh attestation verify version.dll -R gustavczar/dragonwilds-trainer` proves it was built from this tag by GitHub Actions.
@@ -21,7 +23,9 @@ To uninstall, delete `version.dll` and the `dw-trainer` folder next to it.
 3. Abra o jogo. Um cartão no canto superior direito mostra o trainer carregando e diz **Pronto** quando termina.
 4. Carregue o seu mundo e aperte `Esc`: clique no ícone **DW** no canto superior direito.
 
-**Conhecido:** inimigos mortos com o *One Hit* parecem não soltar itens. Desligue quando quiser o drop.
+### Novidades desta versão
+- **Construção livre**: as peças que você já desbloqueou não gastam material. Vem desligada.
+- Os inimigos mortos com o **One Hit** agora soltam os itens.
 
 Para desinstalar, apague o `version.dll` e a pasta `dw-trainer` ao lado dele.
 

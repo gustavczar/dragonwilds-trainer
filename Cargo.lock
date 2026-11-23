@@ -47,7 +47,7 @@ checksum = "c00d31b1d19317b4777ec879192d3745bd97d05262b4b19cb1dda284b9d22f19"
 
 [[package]]
 name = "dw-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -55,7 +55,7 @@ dependencies = [
 
 [[package]]
 name = "dw-probe"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "dw-core",
  "windows-sys",
@@ -63,7 +63,7 @@ dependencies = [
 
 [[package]]
 name = "dw-win"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "dw-core",
  "hudhook",

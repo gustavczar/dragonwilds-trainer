@@ -22,6 +22,8 @@ pub struct Toggles {
     pub one_hit: bool,
     /// Carried items weigh nothing.
     pub zero_weight: bool,
+    /// Building pieces the player has unlocked cost no materials. Off by default.
+    pub free_build: bool,
 }
 
 impl Default for Toggles {
@@ -35,6 +37,7 @@ impl Default for Toggles {
             infinite_special: true,
             one_hit: false,
             zero_weight: true,
+            free_build: false,
         }
     }
 }
@@ -50,11 +53,16 @@ impl Toggles {
         infinite_special: false,
         one_hit: false,
         zero_weight: false,
+        free_build: false,
     };
 }
 
-/// Damage `one_hit` uses to finish a target the player hit.
+/// Damage `one_hit` uses to finish a target the player hit that survived the blow.
 pub const ONE_HIT_DAMAGE: f32 = 999_999.0;
+
+/// Longest wait, after a hit, for the game to credit the player before `one_hit`
+/// finishes the target (the credit is what makes it drop loot).
+pub const ONE_HIT_GRACE_SECONDS: f32 = 1.5;
 
 /// One switch of [`Toggles`], for building the panel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,10 +75,11 @@ pub enum Feature {
     InfiniteSpecial,
     OneHit,
     ZeroWeight,
+    FreeBuild,
 }
 
 impl Feature {
-    pub const ALL: [Feature; 8] = [
+    pub const ALL: [Feature; 9] = [
         Feature::FreeRunes,
         Feature::NoCooldown,
         Feature::FillSlots,
@@ -79,6 +88,7 @@ impl Feature {
         Feature::InfiniteSpecial,
         Feature::OneHit,
         Feature::ZeroWeight,
+        Feature::FreeBuild,
     ];
 
     pub fn label(self, lang: Lang) -> &'static str {
@@ -99,6 +109,8 @@ impl Feature {
             (Feature::OneHit, Lang::PtBr) => "One Hit (qualquer arma ou magia)",
             (Feature::ZeroWeight, Lang::En) => "Zero weight",
             (Feature::ZeroWeight, Lang::PtBr) => "Peso zero",
+            (Feature::FreeBuild, Lang::En) => "Free build (no materials)",
+            (Feature::FreeBuild, Lang::PtBr) => "Construção livre (sem materiais)",
         }
     }
 
@@ -112,6 +124,7 @@ impl Feature {
             Feature::InfiniteSpecial => t.infinite_special,
             Feature::OneHit => t.one_hit,
             Feature::ZeroWeight => t.zero_weight,
+            Feature::FreeBuild => t.free_build,
         }
     }
 
@@ -125,6 +138,7 @@ impl Feature {
             Feature::InfiniteSpecial => t.infinite_special = on,
             Feature::OneHit => t.one_hit = on,
             Feature::ZeroWeight => t.zero_weight = on,
+            Feature::FreeBuild => t.free_build = on,
         }
     }
 }
@@ -254,6 +268,7 @@ mod tests {
     #[test]
     fn defaults_keep_infinite_health_off() {
         assert!(!Toggles::default().infinite_health);
+        assert!(!Toggles::default().free_build);
         let t: Toggles = serde_json::from_str("{}").unwrap();
         assert_eq!(t, Toggles::default(), "missing keys fall back to defaults");
     }

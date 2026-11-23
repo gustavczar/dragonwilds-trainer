@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/dw-core", "crates/dw-win", "crates/dw-probe"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 publish = false

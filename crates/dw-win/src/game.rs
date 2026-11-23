@@ -3,7 +3,7 @@
 //! and attributes (`player_pass`); `tick` applies the features on the game
 //! thread 4x a second.
 //!
-//! Health, stamina, special charge and damage multipliers are `FloatAttribute`
+//! Health, stamina and special charge are `FloatAttribute`
 //! objects owned by the player character. The game reports an attribute's
 //! effective value through `DominionAttributesComponent.BP_TryGetFloatAttributeValue`;
 //! resources are topped up by raising the attribute's `BaseValue`.
@@ -14,6 +14,7 @@ use dw_core::{FunctionInfo, MemoryExt, Reflection, Toggles};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
+use std::time::Instant;
 
 static MEM: InProcess = InProcess;
 static GAME: OnceLock<Game> = OnceLock::new();
@@ -80,6 +81,8 @@ struct Game {
     off: Offsets,
     item_class: u64,
     item_data_class: u64,
+    /// BuildingPieceData class and the offset of its `Requirements` (TArray<ResourceRequirement>).
+    pieces: Option<(u64, u64)>,
     set_immortal: Option<FunctionInfo>,
     set_can_die: Option<FunctionInfo>,
     set_stack: Option<FunctionInfo>,
@@ -89,7 +92,17 @@ struct Game {
     is_dead: Option<FunctionInfo>,
     get_health: Option<FunctionInfo>,
     damage_events: Vec<DamageWatch>,
+    credit: Option<Credit>,
     state: Mutex<State>,
+}
+
+/// Where an AI keeps who hurt it. The game's loot code
+/// (`LootDropComponent::GetAllPlayersDeservingRewards(true)`) rewards only the
+/// players in `AiThreatSystem.DamageInstigators`.
+struct Credit {
+    ai_controller: u64,
+    threat: u64,
+    instigators: u64,
 }
 
 /// The player's objects, found by the background pass.
@@ -114,8 +127,10 @@ struct State {
     /// Damage events logged for the current player (the first few, as evidence).
     damage_logged: u32,
     /// Actors the player hit with one hit on; the next tick finishes any still alive.
-    doomed: Vec<u64>,
+    doomed: Vec<(u64, Instant)>,
     finishes_logged: u32,
+    /// Original requirement count of every BuildingPieceData we emptied.
+    requirements: HashMap<u64, i32>,
     /// Original weight of every ItemData we zeroed.
     weights: HashMap<u64, f32>,
     /// One-time log lines already written for the current player.
@@ -183,9 +198,21 @@ pub fn init(objects: u64, names: u64) -> Result<(), String> {
             _ => log::line(&format!("damage function {name} not found; one hit misses it")),
         }
     }
+    let credit = (|| {
+        Some(Credit {
+            ai_controller: prop("DominionAICharacter", "CachedAiController").ok()?,
+            threat: prop("DominionAIController", "ThreatSystem").ok()?,
+            instigators: prop("AiThreatSystem", "DamageInstigators").ok()?,
+        })
+    })();
+    if credit.is_none() {
+        log::line("AI damage instigators not found; one hit finishes after the full wait");
+    }
     let game = Game {
+        credit,
         item_class: r.find_type("Item").ok_or("class Item not found")?,
         item_data_class: r.find_type("ItemData").ok_or("class ItemData not found")?,
+        pieces: r.find_type("BuildingPieceData").zip(prop("BuildingPieceData", "Requirements").ok()),
         set_immortal: func("HealthComponent", "SetIsImmortal"),
         set_can_die: func("HealthComponent", "SetCanDie"),
         set_stack: func("Item", "SetStackSize"),
@@ -210,6 +237,9 @@ pub fn init(objects: u64, names: u64) -> Result<(), String> {
         if f.is_none() {
             log::line(&format!("function {name} not found; its feature stays off"));
         }
+    }
+    if game.pieces.is_none() {
+        log::line("BuildingPieceData.Requirements not found; free build stays off");
     }
     GAME.set(game).map_err(|_| "init ran twice".to_string())
 }
@@ -307,6 +337,15 @@ impl Game {
             .or_else(|| self.actor_component(actor, "HealthComponent"))
     }
 
+    /// The local player is listed among the AI's damage instigators (the game
+    /// counted a blow as theirs). False when the actor is not an AI.
+    fn hurt_by_player(&self, actor: u64, pawn: u64) -> bool {
+        let Some(p) = &self.credit else { return false };
+        let Some(t) = self.ptr(actor, p.ai_controller).and_then(|c| self.ptr(c, p.threat)) else { return false };
+        let (data, num) = (MEM.read_u64(t + p.instigators).unwrap_or(0), MEM.read_i32(t + p.instigators + 8).unwrap_or(0));
+        (0..num.clamp(0, 16) as u64).any(|i| MEM.read_u64(data + i * 8) == Some(pawn))
+    }
+
     fn base(&self, attr: u64) -> Option<f32> {
         MEM.read_f32(attr + self.off.base_value)
     }
@@ -329,7 +368,6 @@ impl Game {
         engine::call(comp, f, &mut buf);
         (buf[found] != 0).then(|| f32::from_le_bytes(buf[v..v + 4].try_into().unwrap()))
     }
-
 }
 
 /// Calls a no-argument game function that returns a float.
@@ -468,19 +506,18 @@ fn immortality(g: &Game, st: &mut State, t: &Toggles, hc: u64) {
     }
 }
 
-/// One hit, layer 1: called from the ProcessEvent detour *before* the game runs
-/// one of the watched damage functions (`engine::WATCHED[index]`). Those are
-/// notifications that get a *copy* of the damage event (editing it changes
-/// nothing, tested 21/11), but they fire before the blow lands: the target's
-/// health is dropped to 1 through the game's own DecreaseHealth, so the real
-/// blow kills it and the game credits the player (kill, XP, loot). Only for
-/// damage the local player caused; the target is also queued for layer 2.
+/// One hit, part 1. Called from the ProcessEvent detour *before* the game runs
+/// one of the watched damage functions (`engine::WATCHED[index]`); each target
+/// of damage the local player caused is queued for `finish_doomed`. The blow
+/// runs untouched: lowering the target's health here, before it, kept the game
+/// from crediting the player, and the kill dropped no loot (tested 22/11).
 pub fn before_call(index: usize, obj: u64, params: u64) {
     let Some(g) = GAME.get() else { return };
     let Some(watch) = g.damage_events.get(index) else { return };
-    if PAUSED.load(Ordering::Relaxed) || !active_toggles().one_hit {
+    if PAUSED.load(Ordering::Relaxed) {
         return;
     }
+    let one_hit = active_toggles().one_hit;
     let Ok(mut st) = g.state.try_lock() else { return };
     let Some((pc, pawn)) = st.player.as_ref().map(|p| (p.pc, p.pawn)) else { return };
     let event = params + watch.event_offset;
@@ -507,26 +544,29 @@ pub fn before_call(index: usize, obj: u64, params: u64) {
             g.label(hc),
         ));
     }
-    if !mine || amount <= 0.0 {
+    if !one_hit || !mine || amount <= 0.0 {
         return;
     }
-    if let (Some(hc), Some(hp), Some(decrease)) = (hc, hp, &g.decrease_health) {
-        if hp > 1.0 {
-            call_with(hc, decrease, "FloatProperty", &(hp - 1.0).to_le_bytes());
-        }
-    }
-    if let Some(actor) = target.filter(|a| !st.doomed.contains(a)) {
+    if let Some(actor) = target.filter(|a| !st.doomed.iter().any(|(d, _)| d == a)) {
         if st.doomed.len() < 32 {
-            st.doomed.push(actor);
+            st.doomed.push((actor, Instant::now()));
         }
     }
 }
 
-/// One hit, layer 2 (game thread): any actor the player hit that is still
-/// alive gets its health component's DecreaseHealth(999999).
+/// One hit, part 2 (game thread): once the game has credited the player with
+/// the blow, any actor still alive gets its health component's
+/// DecreaseHealth(999999). The credit makes the kill drop its loot.
 fn finish_doomed(g: &Game, st: &mut State) {
     let (Some(decrease), Some(is_dead)) = (&g.decrease_health, &g.is_dead) else { return };
-    for actor in std::mem::take(&mut st.doomed) {
+    let pawn = st.player.as_ref().map_or(0, |p| p.pawn);
+    for (actor, hit) in std::mem::take(&mut st.doomed) {
+        // Wait until the game credits the player with the blow (loot follows
+        // the damage instigators), at most the grace time.
+        if hit.elapsed().as_secs_f32() < features::ONE_HIT_GRACE_SECONDS && g.r.is_object(actor) && !g.hurt_by_player(actor, pawn) {
+            st.doomed.push((actor, hit));
+            continue;
+        }
         if !g.r.is_object(actor) {
             continue;
         }
@@ -537,17 +577,13 @@ fn finish_doomed(g: &Game, st: &mut State) {
             }
             continue;
         };
-        let dead = |hc: u64| {
-            let mut buf = vec![0u8; engine::params_size(is_dead)];
-            engine::call(hc, is_dead, &mut buf);
-            is_dead.params.iter().find(|p| p.name == "ReturnValue").map(|p| buf[p.offset as usize] != 0)
-        };
+        let dead = |hc: u64| dead(hc, is_dead);
         if st.finishes_logged < 5 {
             st.finishes_logged += 1;
             log::line(&format!("finish: {} dead={:?}", g.label(Some(actor)), dead(hc)));
         }
         if dead(hc) != Some(false) {
-            continue; // layer 1 already killed it (or the state is unknown)
+            continue; // the blow already killed it (or the state is unknown)
         }
         call_with(hc, decrease, "FloatProperty", &features::ONE_HIT_DAMAGE.to_le_bytes());
         if st.finishes_logged < 5 {
@@ -555,6 +591,12 @@ fn finish_doomed(g: &Game, st: &mut State) {
             log::line(&format!("finish: {} still alive after the hit; DecreaseHealth -> dead={:?}", g.label(Some(actor)), dead(hc)));
         }
     }
+}
+
+fn dead(hc: u64, is_dead: &FunctionInfo) -> Option<bool> {
+    let mut buf = vec![0u8; engine::params_size(is_dead)];
+    engine::call(hc, is_dead, &mut buf);
+    is_dead.params.iter().find(|p| p.name == "ReturnValue").map(|p| buf[p.offset as usize] != 0)
 }
 
 fn cooldowns(g: &Game, magic: u64) {
@@ -702,5 +744,63 @@ pub fn weights_pass() {
     }
     if st.weights.len() != before {
         log::line(&format!("zero weight: {} item types", st.weights.len()));
+    }
+}
+
+/// Background thread, every 20 s: while free build is on, empties the material
+/// list (`Requirements`, its TArray count set to 0) of every BuildingPieceData;
+/// switched off, the original counts come back. Unlocks live elsewhere, so only
+/// pieces the player has unlocked can be built. Called every 2 s; between full
+/// passes (`full`) it only runs when the switch changed, so a flip applies fast.
+pub fn requirements_pass(full: bool) {
+    static WAS_ON: AtomicBool = AtomicBool::new(false);
+    let Some(g) = GAME.get() else { return };
+    let Some((class, field)) = g.pieces else { return };
+    if PAUSED.load(Ordering::Relaxed) {
+        return;
+    }
+    let on = active_toggles().free_build;
+    if WAS_ON.swap(on, Ordering::Relaxed) == on && !full {
+        return;
+    }
+    let Ok(mut st) = g.state.lock() else { return };
+    if !on {
+        if !st.requirements.is_empty() {
+            log::line(&format!("free build off: {} pieces restored", st.requirements.len()));
+        }
+        for (obj, n) in st.requirements.drain() {
+            if g.r.is_object(obj) {
+                crate::mem::write(obj + field + 8, n);
+            }
+        }
+        return;
+    }
+    drop(st);
+    let mut found = Vec::new();
+    for i in 0..g.r.object_count().unwrap_or(0) {
+        if let Some(o) = g.r.object_at(i) {
+            if g.is_instance(o, class) {
+                found.push(o);
+            }
+        }
+    }
+    let Ok(mut st) = g.state.lock() else { return };
+    let before = st.requirements.len();
+    for o in found {
+        let Some(n) = MEM.read_i32(o + field + 8) else { continue };
+        if n > 0 && !st.requirements.contains_key(&o) {
+            if st.requirements.is_empty() {
+                // Evidence of the layout: element 0 is a ResourceRequirement {Amount i32 @0, ItemData @8}.
+                let data = MEM.read_u64(o + field).unwrap_or(0);
+                let item = MEM.read_u64(data + 8).filter(|&i| g.r.is_object(i));
+                let name = item.and_then(|i| g.r.object_name(i));
+                log::line(&format!("free build: first piece needs {n} entries, [0] = {:?} x {name:?}", MEM.read_i32(data)));
+            }
+            st.requirements.insert(o, n);
+            crate::mem::write(o + field + 8, 0i32);
+        }
+    }
+    if st.requirements.len() != before {
+        log::line(&format!("free build: {} pieces cost nothing", st.requirements.len()));
     }
 }

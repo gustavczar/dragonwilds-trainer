@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/banner.svg" alt="Dragonwilds Trainer: an in-game panel with eight switches for RuneScape: Dragonwilds" width="100%">
+  <img src="assets/banner.svg" alt="Dragonwilds Trainer: an in-game panel with nine switches for RuneScape: Dragonwilds" width="100%">
 </p>
 
 <p align="center">
@@ -36,8 +36,9 @@ from a small panel. No launcher, no installer, nothing running outside the game.
 | Infinite health | off | Keeps the health bar full; you cannot die. |
 | Infinite stamina | on | Keeps stamina full. |
 | Infinite special charge | on | Keeps the blue bar under your health full, for special abilities. |
-| One hit | off | Any enemy you hit with any weapon or spell dies. Enemies killed this way seem to drop no loot, so switch it off when you want the drops. |
+| One hit | off | Any enemy you hit with any weapon or spell dies a moment later, and drops its loot as usual. |
 | Zero weight | on | Carried items weigh nothing. |
+| Free build | off | Building pieces you have already unlocked cost no materials. Locked pieces stay locked. In a world someone else hosts it may not apply. |
 
 Your choices are saved in `dw-trainer/settings.json` and come back the next time you play.
 The panel speaks English or Portuguese: it follows your Windows display language,

@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/banner.svg" alt="Dragonwilds Trainer: um painel no jogo com oito funções para RuneScape: Dragonwilds" width="100%">
+  <img src="assets/banner.svg" alt="Dragonwilds Trainer: um painel no jogo com nove funções para RuneScape: Dragonwilds" width="100%">
 </p>
 
 <p align="center">
@@ -36,8 +36,9 @@ as funções num painel pequeno. Sem launcher, sem instalador, nada rodando fora
 | Vida infinita | desligada | Mantém a barra de vida cheia; você não morre. |
 | Stamina infinita | ligada | Mantém a stamina cheia. |
 | Barra azul infinita | ligada | Mantém cheia a barra azul embaixo da vida, usada pelas habilidades especiais. |
-| One Hit | desligada | Qualquer inimigo que você acertar, com qualquer arma ou magia, morre. Inimigos mortos assim parecem não soltar itens: desligue quando quiser o drop. |
+| One Hit | desligada | Qualquer inimigo que você acertar, com qualquer arma ou magia, morre logo em seguida e solta os itens normalmente. |
 | Peso zero | ligada | Os itens carregados não pesam nada. |
+| Construção livre | desligada | As peças de construção que você já desbloqueou não gastam material. O que não foi desbloqueado continua bloqueado. Num mundo hospedado por outra pessoa, pode não valer. |
 
 As escolhas ficam salvas em `dw-trainer/settings.json` e voltam na próxima vez que você jogar.
 O painel abre em português quando o Windows está em português, e dá para trocar o idioma nele.
